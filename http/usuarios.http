@@ -1,0 +1,175 @@
+# Serviço usuarios — rode com a extensão REST Client do VS Code (botão "Send Request").
+# Execute de cima para baixo: as requisições com "# @name" guardam a resposta
+# (token, ids) para as seguintes reaproveitarem.
+
+@usuarios = http://localhost:3001
+
+### Health: serviço e banco ok -> 200
+GET {{usuarios}}/health
+
+
+# =====================================================================
+# Login
+# =====================================================================
+
+### Login do cliente (seed) -> 200 { token, usuario }
+# @name loginCliente
+POST {{usuarios}}/auth/login
+Content-Type: application/json
+
+{ "email": "cliente@loja.com", "senha": "cliente123" }
+
+### Login do admin (seed) -> 200
+# @name loginAdmin
+POST {{usuarios}}/auth/login
+Content-Type: application/json
+
+{ "email": "admin@loja.com", "senha": "admin123" }
+
+### ERRO: senha errada -> 401
+POST {{usuarios}}/auth/login
+Content-Type: application/json
+
+{ "email": "cliente@loja.com", "senha": "senha-errada" }
+
+### ERRO: login sem senha -> 400
+POST {{usuarios}}/auth/login
+Content-Type: application/json
+
+{ "email": "cliente@loja.com" }
+
+
+# =====================================================================
+# Cadastro
+# =====================================================================
+
+### Cadastrar usuário novo (e-mail aleatório) -> 201, sem senha na resposta
+# @name novoUsuario
+POST {{usuarios}}/usuarios
+Content-Type: application/json
+
+{
+  "nome": "Ana",
+  "email": "ana-{{$randomInt 1000 999999}}@loja.com",
+  "senha": "segredo123"
+}
+
+### ERRO: e-mail já cadastrado -> 409
+POST {{usuarios}}/usuarios
+Content-Type: application/json
+
+{ "nome": "Outro Admin", "email": "admin@loja.com", "senha": "segredo123" }
+
+### ERRO: dados inválidos -> 400 com detalhes
+POST {{usuarios}}/usuarios
+Content-Type: application/json
+
+{ "nome": "", "email": "nao-e-email", "senha": "123" }
+
+### Login do usuário recém-criado -> 200
+# @name loginNovo
+POST {{usuarios}}/auth/login
+Content-Type: application/json
+
+{ "email": "{{novoUsuario.response.body.$.email}}", "senha": "segredo123" }
+
+
+# =====================================================================
+# Meus dados (/usuarios/me) — logado
+# =====================================================================
+
+### Meus dados (cliente) -> 200
+GET {{usuarios}}/usuarios/me
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+
+### ERRO: sem token -> 401
+GET {{usuarios}}/usuarios/me
+
+### ERRO: token inválido -> 401
+GET {{usuarios}}/usuarios/me
+Authorization: Bearer token.invalido.aqui
+
+### Atualizar meus dados (usuário novo, para não mexer no seed) -> 200
+PUT {{usuarios}}/usuarios/me
+Authorization: Bearer {{loginNovo.response.body.$.token}}
+Content-Type: application/json
+
+{
+  "nome": "Ana Souza",
+  "email": "{{novoUsuario.response.body.$.email}}"
+}
+
+### ERRO: trocar para um e-mail que já existe -> 409
+PUT {{usuarios}}/usuarios/me
+Authorization: Bearer {{loginNovo.response.body.$.token}}
+Content-Type: application/json
+
+{ "nome": "Ana Souza", "email": "admin@loja.com" }
+
+### ERRO: atualizar sem nome -> 400
+PUT {{usuarios}}/usuarios/me
+Authorization: Bearer {{loginNovo.response.body.$.token}}
+Content-Type: application/json
+
+{ "nome": "", "email": "{{novoUsuario.response.body.$.email}}" }
+
+
+# =====================================================================
+# Endereços (/usuarios/me/enderecos) — logado
+# =====================================================================
+
+### Endereços do cliente (seed tem 1) -> 200
+GET {{usuarios}}/usuarios/me/enderecos
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+
+### Criar endereço para o usuário novo -> 201
+# @name novoEndereco
+POST {{usuarios}}/usuarios/me/enderecos
+Authorization: Bearer {{loginNovo.response.body.$.token}}
+Content-Type: application/json
+
+{
+  "apelido": "Casa",
+  "cep": "90010-000",
+  "logradouro": "Rua dos Andradas",
+  "numero": "100",
+  "complemento": "Apto 12",
+  "cidade": "Porto Alegre",
+  "uf": "RS",
+  "principal": true
+}
+
+### ERRO: endereço inválido -> 400 com detalhes
+POST {{usuarios}}/usuarios/me/enderecos
+Authorization: Bearer {{loginNovo.response.body.$.token}}
+Content-Type: application/json
+
+{ "cep": "abc", "uf": "RSS" }
+
+### ERRO: apagar endereço de OUTRO usuário -> 404 (não é meu)
+DELETE {{usuarios}}/usuarios/me/enderecos/{{novoEndereco.response.body.$.id}}
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+
+### Apagar meu endereço -> 204
+DELETE {{usuarios}}/usuarios/me/enderecos/{{novoEndereco.response.body.$.id}}
+Authorization: Bearer {{loginNovo.response.body.$.token}}
+
+### ERRO: apagar de novo (não existe mais) -> 404
+DELETE {{usuarios}}/usuarios/me/enderecos/{{novoEndereco.response.body.$.id}}
+Authorization: Bearer {{loginNovo.response.body.$.token}}
+
+
+# =====================================================================
+# Lista de usuários — admin
+# =====================================================================
+
+### Listar usuários como admin -> 200 (sem senha_hash)
+GET {{usuarios}}/usuarios
+Authorization: Bearer {{loginAdmin.response.body.$.token}}
+
+### ERRO: cliente tentando listar -> 403
+GET {{usuarios}}/usuarios
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+
+### ERRO: sem token -> 401
+GET {{usuarios}}/usuarios

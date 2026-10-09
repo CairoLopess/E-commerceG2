@@ -1,0 +1,59 @@
+# Sobe os 2 serviços e os 2 bancos: docker compose up --build
+# Antes, copie .env.example para .env (o JWT_SECRET é obrigatório).
+
+services:
+
+  # ---------- usuarios: Postgres ----------
+  usuarios-db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: usuarios
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+    volumes:
+      - usuarios-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d usuarios"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  usuarios:
+    build: ./usersApi
+    ports:
+      - "3001:3001"
+    environment:
+      # Dentro da rede do Docker, o banco é encontrado pelo nome do serviço
+      DB_URL: jdbc:postgresql://usuarios-db:5432/usuarios
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+      JWT_SECRET: ${JWT_SECRET:?defina JWT_SECRET no .env (copie de .env.example)}
+      JWT_EXPIRACAO: ${JWT_EXPIRACAO:-2h}
+    depends_on:
+      usuarios-db:
+        condition: service_healthy
+
+  # ---------- catalogo: Mongo ----------
+  catalogo-db:
+    image: mongo:8
+    volumes:
+      - catalogo-db-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  catalogo:
+    build: ./catalog-api
+    ports:
+      - "3002:3002"
+    environment:
+      MONGODB_URI: mongodb://catalogo-db:27017/catalogo
+    depends_on:
+      catalogo-db:
+        condition: service_healthy
+
+volumes:
+  usuarios-db-data:
+  catalogo-db-data:
