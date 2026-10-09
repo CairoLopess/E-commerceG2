@@ -12,7 +12,7 @@
 	<artifactId>catalog-api</artifactId>
 	<version>0.0.1-SNAPSHOT</version>
 	<name>catalog-api</name>
-	<description/>
+	<description>Serviço de catálogo do e-commerce: produtos, categorias e estoque</description>
 	<url/>
 	<licenses>
 		<license/>
@@ -34,6 +34,14 @@
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-webmvc</artifactId>
 		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-data-mongodb</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-validation</artifactId>
+		</dependency>
 
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
@@ -44,6 +52,13 @@
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-webmvc-test</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<!-- Mongo real embutido nos testes: baixa e sobe um mongod, sem precisar de Docker -->
+		<dependency>
+			<groupId>de.flapdoodle.embed</groupId>
+			<artifactId>de.flapdoodle.embed.mongo</artifactId>
+			<version>4.20.0</version>
 			<scope>test</scope>
 		</dependency>
 	</dependencies>

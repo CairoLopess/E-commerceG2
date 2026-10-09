@@ -1,0 +1,146 @@
+# Serviço catalogo — rode com a extensão REST Client do VS Code (botão "Send Request").
+# Execute de cima para baixo: as requisições com "# @name" guardam a resposta
+# (ids) para as seguintes reaproveitarem.
+# Rotas de admin ficam abertas nesta aula; o gateway passa a protegê-las na aula 2.
+
+@catalogo = http://localhost:3002
+
+### Health: serviço e banco ok -> 200
+GET {{catalogo}}/health
+
+
+# =====================================================================
+# Vitrine (público)
+# =====================================================================
+
+### Listar produtos ativos -> 200
+# @name lista
+GET {{catalogo}}/produtos
+
+### Filtrar por categoria -> 200
+GET {{catalogo}}/produtos?categoria=livros
+
+### Buscar pelo nome (não diferencia maiúsculas) -> 200
+GET {{catalogo}}/produtos?busca=smartphone
+
+### Categoria + busca juntas -> 200
+GET {{catalogo}}/produtos?categoria=roupas&busca=camis
+
+### Buscar um produto pelo id -> 200
+GET {{catalogo}}/produtos/{{lista.response.body.$[0].id}}
+
+### ERRO: produto que não existe -> 404
+GET {{catalogo}}/produtos/id-que-nao-existe
+
+
+# =====================================================================
+# Categorias
+# =====================================================================
+
+### Listar categorias -> 200
+GET {{catalogo}}/categorias
+
+### Criar categoria (slug aleatório) -> 201
+POST {{catalogo}}/categorias
+Content-Type: application/json
+
+{ "nome": "Eletrônicos", "slug": "eletronicos-{{$randomInt 1000 999999}}" }
+
+### ERRO: slug repetido -> 409
+POST {{catalogo}}/categorias
+Content-Type: application/json
+
+{ "nome": "Celulares de novo", "slug": "celulares" }
+
+### ERRO: slug inválido -> 400
+POST {{catalogo}}/categorias
+Content-Type: application/json
+
+{ "nome": "Ruim", "slug": "Com Espaço" }
+
+
+# =====================================================================
+# Produtos (admin)
+# =====================================================================
+
+### Criar produto (SKU aleatório) -> 201
+# @name novoProduto
+POST {{catalogo}}/produtos
+Content-Type: application/json
+
+{
+  "sku": "LIV-{{$randomInt 1000 999999}}",
+  "nome": "Spring Boot na Prática",
+  "categoria": "livros",
+  "preco": 119.90,
+  "atributos": { "autor": "Fulano de Tal", "paginas": 350 },
+  "estoque": { "disponivel": 15 }
+}
+
+### ERRO: SKU já existe -> 409
+POST {{catalogo}}/produtos
+Content-Type: application/json
+
+{
+  "sku": "CEL-001",
+  "nome": "Smartphone repetido",
+  "categoria": "celulares",
+  "preco": 1999.90
+}
+
+### ERRO: preço negativo e sem SKU -> 400 com detalhes
+POST {{catalogo}}/produtos
+Content-Type: application/json
+
+{ "nome": "Produto inválido", "categoria": "livros", "preco": -10 }
+
+### ERRO: categoria que não existe -> 400
+POST {{catalogo}}/produtos
+Content-Type: application/json
+
+{ "sku": "BRQ-001", "nome": "Carrinho", "categoria": "brinquedos", "preco": 49.90 }
+
+### Substituir o produto (PUT) -> 200
+PUT {{catalogo}}/produtos/{{novoProduto.response.body.$.id}}
+Content-Type: application/json
+
+{
+  "sku": "{{novoProduto.response.body.$.sku}}",
+  "nome": "Spring Boot na Prática - 2ª edição",
+  "categoria": "livros",
+  "preco": 139.90,
+  "atributos": { "autor": "Fulano de Tal", "paginas": 420 }
+}
+
+### ERRO: PUT em produto que não existe -> 404
+PUT {{catalogo}}/produtos/id-que-nao-existe
+Content-Type: application/json
+
+{ "sku": "XXX-1", "nome": "Nada", "categoria": "livros", "preco": 1 }
+
+### Ajustar estoque (define o valor disponível) -> 200
+PATCH {{catalogo}}/produtos/{{novoProduto.response.body.$.id}}/estoque
+Content-Type: application/json
+
+{ "disponivel": 25 }
+
+### ERRO: estoque negativo -> 400
+PATCH {{catalogo}}/produtos/{{novoProduto.response.body.$.id}}/estoque
+Content-Type: application/json
+
+{ "disponivel": -1 }
+
+### ERRO: estoque de produto que não existe -> 404
+PATCH {{catalogo}}/produtos/id-que-nao-existe/estoque
+Content-Type: application/json
+
+{ "disponivel": 5 }
+
+### Desativar produto (não apaga, ativo = false) -> 204
+DELETE {{catalogo}}/produtos/{{novoProduto.response.body.$.id}}
+
+### Produto desativado some da vitrine -> 404
+GET {{catalogo}}/produtos/{{novoProduto.response.body.$.id}}
+
+### ERRO: desativar produto que não existe -> 404
+DELETE {{catalogo}}/produtos/id-que-nao-existe
