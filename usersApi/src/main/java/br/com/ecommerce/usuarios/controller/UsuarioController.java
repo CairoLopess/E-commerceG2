@@ -1,14 +1,14 @@
 package br.com.ecommerce.usuarios.controller;
 
 import java.util.List;
+import java.util.UUID;
 
 import org.springframework.http.HttpStatus;
-import org.springframework.security.core.annotation.AuthenticationPrincipal;
-import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
@@ -37,21 +37,21 @@ public class UsuarioController {
 		return usuarioService.criar(request);
 	}
 
-	// admin (regra no SecurityConfig)
+	// admin: o gateway só deixa passar token com perfil admin (jwt + acl no kong.yml)
 	@GetMapping
 	public List<UsuarioResponse> listar() {
 		return usuarioService.listar();
 	}
 
 	@GetMapping("/me")
-	public UsuarioResponse meusDados(@AuthenticationPrincipal Jwt jwt) {
-		return usuarioService.buscar(UsuarioLogado.id(jwt));
+	public UsuarioResponse meusDados(@RequestHeader(UsuarioLogado.ID) UUID usuarioId) {
+		return usuarioService.buscar(usuarioId);
 	}
 
 	@PutMapping("/me")
-	public UsuarioResponse atualizar(@AuthenticationPrincipal Jwt jwt,
+	public UsuarioResponse atualizar(@RequestHeader(UsuarioLogado.ID) UUID usuarioId,
 			@Valid @RequestBody UsuarioUpdateRequest request) {
-		return usuarioService.atualizar(UsuarioLogado.id(jwt), request);
+		return usuarioService.atualizar(usuarioId, request);
 	}
 
 }

@@ -1,0 +1,78 @@
+package br.com.ecommerce.pedidos.exception;
+
+import java.util.List;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpStatusCode;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.MissingRequestHeaderException;
+import org.springframework.web.bind.ServletRequestBindingException;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.context.request.WebRequest;
+import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
+
+import br.com.ecommerce.pedidos.security.UsuarioLogado;
+
+/**
+ * Converte toda exceção no formato { "erro": ..., "detalhes": [...] }.
+ * Nunca devolve stack trace nem mensagem do banco.
+ */
+@RestControllerAdvice
+public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
+
+	private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
+
+	@ExceptionHandler(ApiException.class)
+	public ResponseEntity<ErroResponse> handleApi(ApiException ex) {
+		return ResponseEntity.status(ex.getStatus()).body(new ErroResponse(ex.getMessage()));
+	}
+
+	@ExceptionHandler(Exception.class)
+	public ResponseEntity<ErroResponse> handleInesperado(Exception ex) {
+		log.error("Erro inesperado", ex);
+		return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(new ErroResponse("Erro interno."));
+	}
+
+	@Override
+	protected ResponseEntity<Object> handleMethodArgumentNotValid(MethodArgumentNotValidException ex,
+			HttpHeaders headers, HttpStatusCode status, WebRequest request) {
+		List<String> detalhes = ex.getBindingResult().getFieldErrors().stream()
+				.map(erro -> erro.getDefaultMessage())
+				.sorted()
+				.toList();
+		return ResponseEntity.badRequest().body(new ErroResponse("Dados inválidos.", detalhes));
+	}
+
+	// Sem X-User-Id / X-User-Email: a requisição não veio pelo gateway (ou veio sem token)
+	@Override
+	protected ResponseEntity<Object> handleServletRequestBindingException(ServletRequestBindingException ex,
+			HttpHeaders headers, HttpStatusCode status, WebRequest request) {
+		if (ex instanceof MissingRequestHeaderException faltando
+				&& (UsuarioLogado.ID.equals(faltando.getHeaderName())
+						|| UsuarioLogado.EMAIL.equals(faltando.getHeaderName()))) {
+			return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+					.body(new ErroResponse("Usuário não identificado. Faça login e acesse pelo gateway."));
+		}
+		return super.handleServletRequestBindingException(ex, headers, status, request);
+	}
+
+	// Demais erros do Spring MVC (JSON malformado, rota inexistente, método errado...)
+	@Override
+	protected ResponseEntity<Object> handleExceptionInternal(Exception ex, Object body, HttpHeaders headers,
+			HttpStatusCode statusCode, WebRequest request) {
+		String mensagem = switch (statusCode.value()) {
+			case 400 -> "Requisição inválida.";
+			case 404 -> "Recurso não encontrado.";
+			case 405 -> "Método não permitido para esta rota.";
+			case 415 -> "Content-Type não suportado. Use application/json.";
+			default -> "Erro ao processar a requisição.";
+		};
+		return ResponseEntity.status(statusCode).headers(headers).body(new ErroResponse(mensagem));
+	}
+
+}

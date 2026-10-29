@@ -1,11 +1,13 @@
 # Serviço usuarios — rode com a extensão REST Client do VS Code (botão "Send Request").
 # Execute de cima para baixo: as requisições com "# @name" guardam a resposta
 # (token, ids) para as seguintes reaproveitarem.
+# Tudo passa pelo gateway (Kong). As respostas 401/403 de token e perfil vêm do próprio Kong.
+# O login aceita 10 tentativas por minuto por IP; a 11ª recebe 429.
 
-@usuarios = http://localhost:3001
+@baseUrl = http://localhost:8080
 
 ### Health: serviço e banco ok -> 200
-GET {{usuarios}}/health
+GET {{baseUrl}}/health/usuarios
 
 
 # =====================================================================
@@ -14,26 +16,26 @@ GET {{usuarios}}/health
 
 ### Login do cliente (seed) -> 200 { token, usuario }
 # @name loginCliente
-POST {{usuarios}}/auth/login
+POST {{baseUrl}}/auth/login
 Content-Type: application/json
 
 { "email": "cliente@loja.com", "senha": "cliente123" }
 
 ### Login do admin (seed) -> 200
 # @name loginAdmin
-POST {{usuarios}}/auth/login
+POST {{baseUrl}}/auth/login
 Content-Type: application/json
 
 { "email": "admin@loja.com", "senha": "admin123" }
 
 ### ERRO: senha errada -> 401
-POST {{usuarios}}/auth/login
+POST {{baseUrl}}/auth/login
 Content-Type: application/json
 
 { "email": "cliente@loja.com", "senha": "senha-errada" }
 
 ### ERRO: login sem senha -> 400
-POST {{usuarios}}/auth/login
+POST {{baseUrl}}/auth/login
 Content-Type: application/json
 
 { "email": "cliente@loja.com" }
@@ -45,7 +47,7 @@ Content-Type: application/json
 
 ### Cadastrar usuário novo (e-mail aleatório) -> 201, sem senha na resposta
 # @name novoUsuario
-POST {{usuarios}}/usuarios
+POST {{baseUrl}}/usuarios
 Content-Type: application/json
 
 {
@@ -55,20 +57,20 @@ Content-Type: application/json
 }
 
 ### ERRO: e-mail já cadastrado -> 409
-POST {{usuarios}}/usuarios
+POST {{baseUrl}}/usuarios
 Content-Type: application/json
 
 { "nome": "Outro Admin", "email": "admin@loja.com", "senha": "segredo123" }
 
 ### ERRO: dados inválidos -> 400 com detalhes
-POST {{usuarios}}/usuarios
+POST {{baseUrl}}/usuarios
 Content-Type: application/json
 
 { "nome": "", "email": "nao-e-email", "senha": "123" }
 
 ### Login do usuário recém-criado -> 200
 # @name loginNovo
-POST {{usuarios}}/auth/login
+POST {{baseUrl}}/auth/login
 Content-Type: application/json
 
 { "email": "{{novoUsuario.response.body.$.email}}", "senha": "segredo123" }
@@ -79,18 +81,18 @@ Content-Type: application/json
 # =====================================================================
 
 ### Meus dados (cliente) -> 200
-GET {{usuarios}}/usuarios/me
+GET {{baseUrl}}/usuarios/me
 Authorization: Bearer {{loginCliente.response.body.$.token}}
 
 ### ERRO: sem token -> 401
-GET {{usuarios}}/usuarios/me
+GET {{baseUrl}}/usuarios/me
 
 ### ERRO: token inválido -> 401
-GET {{usuarios}}/usuarios/me
+GET {{baseUrl}}/usuarios/me
 Authorization: Bearer token.invalido.aqui
 
 ### Atualizar meus dados (usuário novo, para não mexer no seed) -> 200
-PUT {{usuarios}}/usuarios/me
+PUT {{baseUrl}}/usuarios/me
 Authorization: Bearer {{loginNovo.response.body.$.token}}
 Content-Type: application/json
 
@@ -100,14 +102,14 @@ Content-Type: application/json
 }
 
 ### ERRO: trocar para um e-mail que já existe -> 409
-PUT {{usuarios}}/usuarios/me
+PUT {{baseUrl}}/usuarios/me
 Authorization: Bearer {{loginNovo.response.body.$.token}}
 Content-Type: application/json
 
 { "nome": "Ana Souza", "email": "admin@loja.com" }
 
 ### ERRO: atualizar sem nome -> 400
-PUT {{usuarios}}/usuarios/me
+PUT {{baseUrl}}/usuarios/me
 Authorization: Bearer {{loginNovo.response.body.$.token}}
 Content-Type: application/json
 
@@ -119,12 +121,12 @@ Content-Type: application/json
 # =====================================================================
 
 ### Endereços do cliente (seed tem 1) -> 200
-GET {{usuarios}}/usuarios/me/enderecos
+GET {{baseUrl}}/usuarios/me/enderecos
 Authorization: Bearer {{loginCliente.response.body.$.token}}
 
 ### Criar endereço para o usuário novo -> 201
 # @name novoEndereco
-POST {{usuarios}}/usuarios/me/enderecos
+POST {{baseUrl}}/usuarios/me/enderecos
 Authorization: Bearer {{loginNovo.response.body.$.token}}
 Content-Type: application/json
 
@@ -140,22 +142,22 @@ Content-Type: application/json
 }
 
 ### ERRO: endereço inválido -> 400 com detalhes
-POST {{usuarios}}/usuarios/me/enderecos
+POST {{baseUrl}}/usuarios/me/enderecos
 Authorization: Bearer {{loginNovo.response.body.$.token}}
 Content-Type: application/json
 
 { "cep": "abc", "uf": "RSS" }
 
 ### ERRO: apagar endereço de OUTRO usuário -> 404 (não é meu)
-DELETE {{usuarios}}/usuarios/me/enderecos/{{novoEndereco.response.body.$.id}}
+DELETE {{baseUrl}}/usuarios/me/enderecos/{{novoEndereco.response.body.$.id}}
 Authorization: Bearer {{loginCliente.response.body.$.token}}
 
 ### Apagar meu endereço -> 204
-DELETE {{usuarios}}/usuarios/me/enderecos/{{novoEndereco.response.body.$.id}}
+DELETE {{baseUrl}}/usuarios/me/enderecos/{{novoEndereco.response.body.$.id}}
 Authorization: Bearer {{loginNovo.response.body.$.token}}
 
 ### ERRO: apagar de novo (não existe mais) -> 404
-DELETE {{usuarios}}/usuarios/me/enderecos/{{novoEndereco.response.body.$.id}}
+DELETE {{baseUrl}}/usuarios/me/enderecos/{{novoEndereco.response.body.$.id}}
 Authorization: Bearer {{loginNovo.response.body.$.token}}
 
 
@@ -164,12 +166,17 @@ Authorization: Bearer {{loginNovo.response.body.$.token}}
 # =====================================================================
 
 ### Listar usuários como admin -> 200 (sem senha_hash)
-GET {{usuarios}}/usuarios
+GET {{baseUrl}}/usuarios
 Authorization: Bearer {{loginAdmin.response.body.$.token}}
 
 ### ERRO: cliente tentando listar -> 403
-GET {{usuarios}}/usuarios
+GET {{baseUrl}}/usuarios
 Authorization: Bearer {{loginCliente.response.body.$.token}}
 
 ### ERRO: sem token -> 401
-GET {{usuarios}}/usuarios
+GET {{baseUrl}}/usuarios
+
+### ERRO: tentar se passar por admin pelo cabeçalho, sem token -> 401
+# O Kong apaga os X-User-* que vêm de fora: ninguém escolhe quem é.
+GET {{baseUrl}}/usuarios
+X-User-Role: admin

@@ -1,12 +1,26 @@
 # Serviço catalogo — rode com a extensão REST Client do VS Code (botão "Send Request").
 # Execute de cima para baixo: as requisições com "# @name" guardam a resposta
-# (ids) para as seguintes reaproveitarem.
-# Rotas de admin ficam abertas nesta aula; o gateway passa a protegê-las na aula 2.
+# (token, ids) para as seguintes reaproveitarem.
+# Tudo passa pelo gateway (Kong): a vitrine é pública; criar, alterar e apagar exige token de admin.
 
-@catalogo = http://localhost:3002
+@baseUrl = http://localhost:8080
 
 ### Health: serviço e banco ok -> 200
-GET {{catalogo}}/health
+GET {{baseUrl}}/health/catalogo
+
+### Login do admin (seed) -> 200
+# @name loginAdmin
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{ "email": "admin@loja.com", "senha": "admin123" }
+
+### Login do cliente (seed) -> 200
+# @name loginCliente
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{ "email": "cliente@loja.com", "senha": "cliente123" }
 
 
 # =====================================================================
@@ -15,22 +29,22 @@ GET {{catalogo}}/health
 
 ### Listar produtos ativos -> 200
 # @name lista
-GET {{catalogo}}/produtos
+GET {{baseUrl}}/produtos
 
 ### Filtrar por categoria -> 200
-GET {{catalogo}}/produtos?categoria=livros
+GET {{baseUrl}}/produtos?categoria=livros
 
 ### Buscar pelo nome (não diferencia maiúsculas) -> 200
-GET {{catalogo}}/produtos?busca=smartphone
+GET {{baseUrl}}/produtos?busca=smartphone
 
 ### Categoria + busca juntas -> 200
-GET {{catalogo}}/produtos?categoria=roupas&busca=camis
+GET {{baseUrl}}/produtos?categoria=roupas&busca=camis
 
 ### Buscar um produto pelo id -> 200
-GET {{catalogo}}/produtos/{{lista.response.body.$[0].id}}
+GET {{baseUrl}}/produtos/{{lista.response.body.$[0].id}}
 
 ### ERRO: produto que não existe -> 404
-GET {{catalogo}}/produtos/id-que-nao-existe
+GET {{baseUrl}}/produtos/id-que-nao-existe
 
 
 # =====================================================================
@@ -38,22 +52,25 @@ GET {{catalogo}}/produtos/id-que-nao-existe
 # =====================================================================
 
 ### Listar categorias -> 200
-GET {{catalogo}}/categorias
+GET {{baseUrl}}/categorias
 
 ### Criar categoria (slug aleatório) -> 201
-POST {{catalogo}}/categorias
+POST {{baseUrl}}/categorias
+Authorization: Bearer {{loginAdmin.response.body.$.token}}
 Content-Type: application/json
 
 { "nome": "Eletrônicos", "slug": "eletronicos-{{$randomInt 1000 999999}}" }
 
 ### ERRO: slug repetido -> 409
-POST {{catalogo}}/categorias
+POST {{baseUrl}}/categorias
+Authorization: Bearer {{loginAdmin.response.body.$.token}}
 Content-Type: application/json
 
 { "nome": "Celulares de novo", "slug": "celulares" }
 
 ### ERRO: slug inválido -> 400
-POST {{catalogo}}/categorias
+POST {{baseUrl}}/categorias
+Authorization: Bearer {{loginAdmin.response.body.$.token}}
 Content-Type: application/json
 
 { "nome": "Ruim", "slug": "Com Espaço" }
@@ -63,9 +80,23 @@ Content-Type: application/json
 # Produtos (admin)
 # =====================================================================
 
+### ERRO: criar produto sem token -> 401 (o Kong barra, o catálogo nem recebe)
+POST {{baseUrl}}/produtos
+Content-Type: application/json
+
+{ "sku": "LIV-401", "nome": "Sem token", "categoria": "livros", "preco": 10 }
+
+### ERRO: cliente criando produto -> 403 (token válido, mas o perfil não é admin)
+POST {{baseUrl}}/produtos
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+Content-Type: application/json
+
+{ "sku": "LIV-403", "nome": "Cliente tentando", "categoria": "livros", "preco": 10 }
+
 ### Criar produto (SKU aleatório) -> 201
 # @name novoProduto
-POST {{catalogo}}/produtos
+POST {{baseUrl}}/produtos
+Authorization: Bearer {{loginAdmin.response.body.$.token}}
 Content-Type: application/json
 
 {
@@ -78,7 +109,8 @@ Content-Type: application/json
 }
 
 ### ERRO: SKU já existe -> 409
-POST {{catalogo}}/produtos
+POST {{baseUrl}}/produtos
+Authorization: Bearer {{loginAdmin.response.body.$.token}}
 Content-Type: application/json
 
 {
@@ -89,19 +121,22 @@ Content-Type: application/json
 }
 
 ### ERRO: preço negativo e sem SKU -> 400 com detalhes
-POST {{catalogo}}/produtos
+POST {{baseUrl}}/produtos
+Authorization: Bearer {{loginAdmin.response.body.$.token}}
 Content-Type: application/json
 
 { "nome": "Produto inválido", "categoria": "livros", "preco": -10 }
 
 ### ERRO: categoria que não existe -> 400
-POST {{catalogo}}/produtos
+POST {{baseUrl}}/produtos
+Authorization: Bearer {{loginAdmin.response.body.$.token}}
 Content-Type: application/json
 
 { "sku": "BRQ-001", "nome": "Carrinho", "categoria": "brinquedos", "preco": 49.90 }
 
 ### Substituir o produto (PUT) -> 200
-PUT {{catalogo}}/produtos/{{novoProduto.response.body.$.id}}
+PUT {{baseUrl}}/produtos/{{novoProduto.response.body.$.id}}
+Authorization: Bearer {{loginAdmin.response.body.$.token}}
 Content-Type: application/json
 
 {
@@ -113,34 +148,40 @@ Content-Type: application/json
 }
 
 ### ERRO: PUT em produto que não existe -> 404
-PUT {{catalogo}}/produtos/id-que-nao-existe
+PUT {{baseUrl}}/produtos/id-que-nao-existe
+Authorization: Bearer {{loginAdmin.response.body.$.token}}
 Content-Type: application/json
 
 { "sku": "XXX-1", "nome": "Nada", "categoria": "livros", "preco": 1 }
 
 ### Ajustar estoque (define o valor disponível) -> 200
-PATCH {{catalogo}}/produtos/{{novoProduto.response.body.$.id}}/estoque
+PATCH {{baseUrl}}/produtos/{{novoProduto.response.body.$.id}}/estoque
+Authorization: Bearer {{loginAdmin.response.body.$.token}}
 Content-Type: application/json
 
 { "disponivel": 25 }
 
 ### ERRO: estoque negativo -> 400
-PATCH {{catalogo}}/produtos/{{novoProduto.response.body.$.id}}/estoque
+PATCH {{baseUrl}}/produtos/{{novoProduto.response.body.$.id}}/estoque
+Authorization: Bearer {{loginAdmin.response.body.$.token}}
 Content-Type: application/json
 
 { "disponivel": -1 }
 
 ### ERRO: estoque de produto que não existe -> 404
-PATCH {{catalogo}}/produtos/id-que-nao-existe/estoque
+PATCH {{baseUrl}}/produtos/id-que-nao-existe/estoque
+Authorization: Bearer {{loginAdmin.response.body.$.token}}
 Content-Type: application/json
 
 { "disponivel": 5 }
 
 ### Desativar produto (não apaga, ativo = false) -> 204
-DELETE {{catalogo}}/produtos/{{novoProduto.response.body.$.id}}
+DELETE {{baseUrl}}/produtos/{{novoProduto.response.body.$.id}}
+Authorization: Bearer {{loginAdmin.response.body.$.token}}
 
 ### Produto desativado some da vitrine -> 404
-GET {{catalogo}}/produtos/{{novoProduto.response.body.$.id}}
+GET {{baseUrl}}/produtos/{{novoProduto.response.body.$.id}}
 
 ### ERRO: desativar produto que não existe -> 404
-DELETE {{catalogo}}/produtos/id-que-nao-existe
+DELETE {{baseUrl}}/produtos/id-que-nao-existe
+Authorization: Bearer {{loginAdmin.response.body.$.token}}

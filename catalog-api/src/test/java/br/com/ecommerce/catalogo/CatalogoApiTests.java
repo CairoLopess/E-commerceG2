@@ -22,8 +22,11 @@ import java.util.UUID;
 
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.MediaType;
@@ -114,6 +117,22 @@ class CatalogoApiTests {
 			.andExpect(jsonPath("$[*].sku", hasItem("CEL-001")))
 			.andExpect(jsonPath("$[*].sku", hasItem("CEL-002")))
 			.andExpect(jsonPath("$[*].categoria", everyItem(is("celulares"))));
+	}
+
+	@Test
+	void listaPorIdsDevolveSoOsAtivosQueExistem() throws Exception {
+		// É a chamada do checkout do pedidos: todos os produtos do carrinho de uma vez
+		String a = criarProduto(skuNovo());
+		String b = criarProduto(skuNovo());
+		String desativado = criarProduto(skuNovo());
+		mvc.perform(delete("/produtos/" + desativado)).andExpect(status().isNoContent());
+
+		mvc.perform(get("/produtos").param("ids", a + "," + b + "," + desativado + ",id-que-nao-existe"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$", hasSize(2)))
+			.andExpect(jsonPath("$[*].id", hasItem(a)))
+			.andExpect(jsonPath("$[*].id", hasItem(b)))
+			.andExpect(jsonPath("$[*].id", not(hasItem(desativado))));
 	}
 
 	@Test
@@ -233,6 +252,18 @@ class CatalogoApiTests {
 		mvc.perform(post("/categorias").contentType(MediaType.APPLICATION_JSON)
 				.content("{\"nome\":\"Ruim\",\"slug\":\"Com Espaço\"}"))
 			.andExpect(status().isBadRequest());
+	}
+
+	@Test
+	@ExtendWith(OutputCaptureExtension.class)
+	void logDeCadaRequisicaoSaiComOXRequestId(CapturedOutput saida) throws Exception {
+		mvc.perform(get("/health").header("X-Request-Id", "3c37be51-teste")).andExpect(status().isOk());
+		// Id forjado (com quebra de linha, para inventar uma linha no log) não entra
+		mvc.perform(get("/health").header("X-Request-Id", "falso\nlinha forjada")).andExpect(status().isOk());
+
+		assertThat(saida.getOut().lines().filter(linha -> linha.contains("GET /health -> 200")))
+			.anyMatch(linha -> linha.contains("[3c37be51-teste]"));
+		assertThat(saida.getOut()).doesNotContain("linha forjada");
 	}
 
 	@Test

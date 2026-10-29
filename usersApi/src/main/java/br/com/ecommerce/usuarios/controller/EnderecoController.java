@@ -4,13 +4,12 @@ import java.util.List;
 import java.util.UUID;
 
 import org.springframework.http.HttpStatus;
-import org.springframework.security.core.annotation.AuthenticationPrincipal;
-import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
@@ -32,20 +31,21 @@ public class EnderecoController {
 	}
 
 	@GetMapping
-	public List<EnderecoResponse> listar(@AuthenticationPrincipal Jwt jwt) {
-		return enderecoService.listar(UsuarioLogado.id(jwt));
+	public List<EnderecoResponse> listar(@RequestHeader(UsuarioLogado.ID) UUID usuarioId) {
+		return enderecoService.listar(usuarioId);
 	}
 
 	@PostMapping
 	@ResponseStatus(HttpStatus.CREATED)
-	public EnderecoResponse criar(@AuthenticationPrincipal Jwt jwt, @Valid @RequestBody EnderecoRequest request) {
-		return enderecoService.criar(UsuarioLogado.id(jwt), request);
+	public EnderecoResponse criar(@RequestHeader(UsuarioLogado.ID) UUID usuarioId,
+			@Valid @RequestBody EnderecoRequest request) {
+		return enderecoService.criar(usuarioId, request);
 	}
 
 	@DeleteMapping("/{id}")
 	@ResponseStatus(HttpStatus.NO_CONTENT)
-	public void remover(@AuthenticationPrincipal Jwt jwt, @PathVariable UUID id) {
-		enderecoService.remover(UsuarioLogado.id(jwt), id);
+	public void remover(@RequestHeader(UsuarioLogado.ID) UUID usuarioId, @PathVariable UUID id) {
+		enderecoService.remover(usuarioId, id);
 	}
 
 }
