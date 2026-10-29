@@ -1,17 +1,16 @@
 package br.com.ecommerce.usuarios.security;
 
-import java.util.UUID;
-
-import org.springframework.security.oauth2.jwt.Jwt;
-
+/**
+ * Cabeçalhos com a identidade de quem chamou. Quem escreve é o gateway, a partir do token
+ * já validado; o que o cliente mandar com esses nomes é apagado antes (ver kong/kong.yml).
+ * O serviço confia neles porque só o gateway o alcança: nenhuma porta é publicada.
+ */
 public final class UsuarioLogado {
 
-	private UsuarioLogado() {
-	}
+	// O "sub" do token: o id do usuário
+	public static final String ID = "X-User-Id";
 
-	// O "sub" do token é o id do usuário (ver JwtService)
-	public static UUID id(Jwt jwt) {
-		return UUID.fromString(jwt.getSubject());
+	private UsuarioLogado() {
 	}
 
 }

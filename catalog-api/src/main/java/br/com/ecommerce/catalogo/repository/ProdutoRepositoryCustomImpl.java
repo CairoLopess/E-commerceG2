@@ -20,8 +20,11 @@ class ProdutoRepositoryCustomImpl implements ProdutoRepositoryCustom {
 	}
 
 	@Override
-	public List<Produto> buscarAtivos(String categoria, String busca) {
+	public List<Produto> buscarAtivos(String categoria, String busca, List<String> ids) {
 		Criteria criteria = Criteria.where("ativo").is(true);
+		if (ids != null && !ids.isEmpty()) {
+			criteria = criteria.and("id").in(ids);
+		}
 		if (categoria != null && !categoria.isBlank()) {
 			criteria = criteria.and("categoria").is(categoria);
 		}

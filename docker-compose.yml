@@ -1,4 +1,5 @@
-# Sobe os 2 serviços e os 2 bancos: docker compose up --build
+# Sobe o gateway, os serviços e os bancos: docker compose up --build
+# Só o gateway publica porta (8080). Dentro da rede, todo serviço escuta na 3000.
 # Antes, copie .env.example para .env (o JWT_SECRET é obrigatório).
 
 services:
@@ -20,9 +21,8 @@ services:
 
   usuarios:
     build: ./usersApi
-    ports:
-      - "3001:3001"
     environment:
+      PORT: 3000
       # Dentro da rede do Docker, o banco é encontrado pelo nome do serviço
       DB_URL: jdbc:postgresql://usuarios-db:5432/usuarios
       DB_USER: ${DB_USER:-postgres}
@@ -46,14 +46,75 @@ services:
 
   catalogo:
     build: ./catalog-api
-    ports:
-      - "3002:3002"
     environment:
+      PORT: 3000
       MONGODB_URI: mongodb://catalogo-db:27017/catalogo
     depends_on:
       catalogo-db:
         condition: service_healthy
 
+  # ---------- pedidos: Postgres próprio ----------
+  pedidos-db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: pedidos
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+    volumes:
+      - pedidos-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d pedidos"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  pedidos:
+    build: ./order-api
+    environment:
+      PORT: 3000
+      PEDIDOS_DB_URL: jdbc:postgresql://pedidos-db:5432/pedidos
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+      # Chamada direta pela rede interna, sem passar pelo gateway
+      CATALOGO_URL: http://catalogo:3000
+    # Sem depends_on no catalogo de propósito: com o catálogo fora, o carrinho e a lista
+    # de pedidos continuam funcionando; só o checkout responde 503.
+    depends_on:
+      pedidos-db:
+        condition: service_healthy
+
+  # ---------- gateway: Kong sem banco ----------
+  # A única porta da API. Os serviços não publicam porta: só o gateway os alcança.
+  gateway:
+    image: kong:3.9
+    ports:
+      - "8080:8000"                # a API da loja
+      - "127.0.0.1:8001:8001"      # Admin API (só leitura no modo sem banco), só nesta máquina
+      - "127.0.0.1:8002:8002"      # Kong Manager, só nesta máquina
+    volumes:
+      - ./kong:/kong:ro
+    # Copia o kong.yml trocando __JWT_SECRET__ pelo segredo do .env e sobe o Kong.
+    # $$ escapa o $ para o compose: quem expande a variável é o sh, dentro do container.
+    entrypoint:
+      - sh
+      - -c
+      - 'sed "s|__JWT_SECRET__|$${JWT_SECRET}|g" /kong/kong.yml > /tmp/kong.yml && exec /docker-entrypoint.sh kong docker-start'
+    environment:
+      # O mesmo segredo que o usuarios usa para assinar os tokens
+      JWT_SECRET: ${JWT_SECRET:?defina JWT_SECRET no .env (copie de .env.example)}
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /tmp/kong.yml
+      KONG_PROXY_LISTEN: 0.0.0.0:8000
+      KONG_ADMIN_LISTEN: 0.0.0.0:8001
+      KONG_ADMIN_GUI_LISTEN: 0.0.0.0:8002
+      # Libera o post-function a ler o token (kong.yml)
+      KONG_UNTRUSTED_LUA_SANDBOX_REQUIRES: kong.plugins.jwt.jwt_parser
+      KONG_PROXY_ACCESS_LOG: /dev/stdout
+      KONG_PROXY_ERROR_LOG: /dev/stderr
+      KONG_ADMIN_ACCESS_LOG: /dev/stdout
+      KONG_ADMIN_ERROR_LOG: /dev/stderr
+
 volumes:
   usuarios-db-data:
   catalogo-db-data:
+  pedidos-db-data:

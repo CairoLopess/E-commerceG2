@@ -1,0 +1,204 @@
+# Serviço pedidos — rode com a extensão REST Client do VS Code (botão "Send Request").
+# Execute de cima para baixo: as requisições com "# @name" guardam a resposta
+# (token, ids) para as seguintes reaproveitarem.
+# Tudo passa pelo gateway (Kong): carrinho e pedidos são rotas de logado (401 sem token).
+
+@baseUrl = http://localhost:8080
+
+### Health: serviço e banco ok -> 200
+GET {{baseUrl}}/health/pedidos
+
+### Login do cliente (seed) -> 200
+# @name loginCliente
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{ "email": "cliente@loja.com", "senha": "cliente123" }
+
+### Login do admin (seed) -> 200 (usado para o caso "pedido de outra pessoa")
+# @name loginAdmin
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{ "email": "admin@loja.com", "senha": "admin123" }
+
+### Vitrine (pública): os produtos que vamos comprar -> 200
+# @name vitrine
+GET {{baseUrl}}/produtos
+
+
+# =====================================================================
+# Carrinho
+# =====================================================================
+
+### ERRO: carrinho sem token -> 401 (o Kong barra, o pedidos nem recebe)
+GET {{baseUrl}}/carrinho
+
+### Carrinho vazio -> 200 { itens: [], total: 0 }
+GET {{baseUrl}}/carrinho
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+
+### Adicionar o 1º produto da vitrine (2 unidades) -> 201
+POST {{baseUrl}}/carrinho/itens
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+Content-Type: application/json
+
+{ "produtoId": "{{vitrine.response.body.$[0].id}}", "quantidade": 2 }
+
+### Adicionar o 2º produto da vitrine -> 201
+POST {{baseUrl}}/carrinho/itens
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+Content-Type: application/json
+
+{ "produtoId": "{{vitrine.response.body.$[1].id}}", "quantidade": 1 }
+
+### Adicionar o 2º produto de novo -> 201, a quantidade soma (fica 2)
+POST {{baseUrl}}/carrinho/itens
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+Content-Type: application/json
+
+{ "produtoId": "{{vitrine.response.body.$[1].id}}", "quantidade": 1 }
+
+### ERRO: quantidade inválida -> 400
+POST {{baseUrl}}/carrinho/itens
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+Content-Type: application/json
+
+{ "produtoId": "{{vitrine.response.body.$[0].id}}", "quantidade": 0 }
+
+### ERRO: produto que não existe no catálogo -> 404
+POST {{baseUrl}}/carrinho/itens
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+Content-Type: application/json
+
+{ "produtoId": "id-que-nao-existe", "quantidade": 1 }
+
+### Ver o carrinho -> 200 { itens, total } com os preços atuais do catálogo
+GET {{baseUrl}}/carrinho
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+
+### Remover o 2º produto -> 204
+DELETE {{baseUrl}}/carrinho/itens/{{vitrine.response.body.$[1].id}}
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+
+### ERRO: remover de novo (não está mais no carrinho) -> 404
+DELETE {{baseUrl}}/carrinho/itens/{{vitrine.response.body.$[1].id}}
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+
+
+# =====================================================================
+# Checkout e pedidos
+# =====================================================================
+
+### Checkout -> 202, status AGUARDANDO_ESTOQUE, só os 4 últimos dígitos do cartão
+# @name pedido
+POST {{baseUrl}}/pedidos
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+Content-Type: application/json
+
+{
+  "enderecoEntrega": {
+    "cep": "90010-000",
+    "logradouro": "Rua dos Andradas",
+    "numero": "100",
+    "complemento": "Apto 12",
+    "cidade": "Porto Alegre",
+    "uf": "RS"
+  },
+  "formaPagamento": "cartao",
+  "numeroCartao": "4111111111111111"
+}
+
+### ERRO: checkout de novo, com o carrinho já vazio -> 400
+POST {{baseUrl}}/pedidos
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+Content-Type: application/json
+
+{
+  "enderecoEntrega": { "cep": "90010-000", "logradouro": "Rua A", "cidade": "Porto Alegre", "uf": "RS" },
+  "formaPagamento": "pix"
+}
+
+### Consultar o pedido -> 200 com os itens (nome e preço copiados do catálogo)
+GET {{baseUrl}}/pedidos/{{pedido.response.body.$.id}}
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+
+### Meus pedidos -> 200
+GET {{baseUrl}}/pedidos
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+
+### ERRO: pedido de outra pessoa -> 404 (não 403: nem confirma que o pedido existe)
+GET {{baseUrl}}/pedidos/{{pedido.response.body.$.id}}
+Authorization: Bearer {{loginAdmin.response.body.$.token}}
+
+### Cancelar o pedido -> 200, status CANCELADO
+POST {{baseUrl}}/pedidos/{{pedido.response.body.$.id}}/cancelar
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+
+### ERRO: cancelar de novo -> 409 (o status não permite)
+POST {{baseUrl}}/pedidos/{{pedido.response.body.$.id}}/cancelar
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+
+
+# =====================================================================
+# Erros do checkout
+# =====================================================================
+
+### Preparar: muito mais unidades do que há em estoque -> 201
+POST {{baseUrl}}/carrinho/itens
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+Content-Type: application/json
+
+{ "produtoId": "{{vitrine.response.body.$[0].id}}", "quantidade": 9999 }
+
+### ERRO: dados de pagamento inválidos -> 400 com detalhes
+POST {{baseUrl}}/pedidos
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+Content-Type: application/json
+
+{ "formaPagamento": "cheque", "numeroCartao": "123" }
+
+### ERRO: estoque insuficiente -> 409
+POST {{baseUrl}}/pedidos
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+Content-Type: application/json
+
+{
+  "enderecoEntrega": { "cep": "90010-000", "logradouro": "Rua A", "cidade": "Porto Alegre", "uf": "RS" },
+  "formaPagamento": "pix"
+}
+
+### Limpar: tirar o item do carrinho -> 204
+DELETE {{baseUrl}}/carrinho/itens/{{vitrine.response.body.$[0].id}}
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+
+### Preparar o teste do catálogo fora: 1 item no carrinho -> 201
+POST {{baseUrl}}/carrinho/itens
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+Content-Type: application/json
+
+{ "produtoId": "{{vitrine.response.body.$[0].id}}", "quantidade": 1 }
+
+# ---------------------------------------------------------------------
+# Catálogo fora do ar. No terminal: docker compose stop catalogo
+# ---------------------------------------------------------------------
+
+### ERRO: checkout com o catálogo fora -> 503 (em até 3 s: o timeout)
+POST {{baseUrl}}/pedidos
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+Content-Type: application/json
+
+{
+  "enderecoEntrega": { "cep": "90010-000", "logradouro": "Rua A", "cidade": "Porto Alegre", "uf": "RS" },
+  "formaPagamento": "pix"
+}
+
+### O carrinho continua funcionando -> 200, itens sem preço e com "aviso"
+GET {{baseUrl}}/carrinho
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+
+### A lista de pedidos também -> 200
+GET {{baseUrl}}/pedidos
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+
+# Depois: docker compose start catalogo

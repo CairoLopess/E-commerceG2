@@ -6,7 +6,7 @@ import br.com.ecommerce.catalogo.document.Produto;
 
 public interface ProdutoRepositoryCustom {
 
-	// Filtros opcionais: categoria exata e busca no nome (sem diferenciar maiúsculas)
-	List<Produto> buscarAtivos(String categoria, String busca);
+	// Filtros opcionais: categoria exata, busca no nome (sem diferenciar maiúsculas) e lista de ids
+	List<Produto> buscarAtivos(String categoria, String busca, List<String> ids);
 
 }

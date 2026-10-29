@@ -29,9 +29,9 @@ public class ProdutoService {
 		this.categoriaRepository = categoriaRepository;
 	}
 
-	// Vitrine pública: só produtos ativos
-	public List<ProdutoResponse> listar(String categoria, String busca) {
-		return produtoRepository.buscarAtivos(categoria, busca).stream()
+	// Vitrine pública: só produtos ativos. Id que não existe ou está desativado fica de fora.
+	public List<ProdutoResponse> listar(String categoria, String busca, List<String> ids) {
+		return produtoRepository.buscarAtivos(categoria, busca, ids).stream()
 				.map(ProdutoResponse::from)
 				.toList();
 	}

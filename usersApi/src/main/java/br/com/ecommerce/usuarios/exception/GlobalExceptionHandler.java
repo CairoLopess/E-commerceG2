@@ -9,13 +9,15 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.access.AccessDeniedException;
-import org.springframework.security.core.AuthenticationException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.MissingRequestHeaderException;
+import org.springframework.web.bind.ServletRequestBindingException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.WebRequest;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
+
+import br.com.ecommerce.usuarios.security.UsuarioLogado;
 
 /**
  * Converte toda exceção no formato { "erro": ..., "detalhes": [...] }.
@@ -29,19 +31,6 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
 	@ExceptionHandler(ApiException.class)
 	public ResponseEntity<ErroResponse> handleApi(ApiException ex) {
 		return ResponseEntity.status(ex.getStatus()).body(new ErroResponse(ex.getMessage()));
-	}
-
-	// 401 e 403 vindos do Spring Security (repassados pelo SecurityErrorHandler)
-	@ExceptionHandler(AuthenticationException.class)
-	public ResponseEntity<ErroResponse> handleAuthentication(AuthenticationException ex) {
-		return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
-				.body(new ErroResponse("Token ausente, inválido ou vencido."));
-	}
-
-	@ExceptionHandler(AccessDeniedException.class)
-	public ResponseEntity<ErroResponse> handleAccessDenied(AccessDeniedException ex) {
-		return ResponseEntity.status(HttpStatus.FORBIDDEN)
-				.body(new ErroResponse("Você não tem permissão para acessar este recurso."));
 	}
 
 	// O banco é a última linha de defesa (UNIQUE, NOT NULL)
@@ -66,6 +55,17 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
 				.sorted()
 				.toList();
 		return ResponseEntity.badRequest().body(new ErroResponse("Dados inválidos.", detalhes));
+	}
+
+	// Rota de logado sem X-User-Id: a requisição não veio pelo gateway (ou veio sem token)
+	@Override
+	protected ResponseEntity<Object> handleServletRequestBindingException(ServletRequestBindingException ex,
+			HttpHeaders headers, HttpStatusCode status, WebRequest request) {
+		if (ex instanceof MissingRequestHeaderException faltando && UsuarioLogado.ID.equals(faltando.getHeaderName())) {
+			return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+					.body(new ErroResponse("Usuário não identificado. Faça login e acesse pelo gateway."));
+		}
+		return super.handleServletRequestBindingException(ex, headers, status, request);
 	}
 
 	// Demais erros do Spring MVC (JSON malformado, rota inexistente, método errado...)

@@ -22,8 +22,9 @@ import br.com.ecommerce.catalogo.service.ProdutoService;
 import jakarta.validation.Valid;
 
 /**
- * Rotas de admin (POST, PUT, PATCH, DELETE) ficam abertas nesta aula: quem vai
- * validar o token e o perfil é o gateway, na aula 2.
+ * Rotas de admin (POST, PUT, PATCH, DELETE): quem confere o token e o perfil é o gateway
+ * (jwt + acl no kong/kong.yml). O serviço não publica porta, então só o gateway e os outros
+ * serviços da rede interna o alcançam.
  */
 @RestController
 @RequestMapping("/produtos")
@@ -35,10 +36,11 @@ public class ProdutoController {
 		this.produtoService = produtoService;
 	}
 
+	// ?ids=a,b,c: o pedidos busca todos os produtos do carrinho numa chamada só
 	@GetMapping
 	public List<ProdutoResponse> listar(@RequestParam(required = false) String categoria,
-			@RequestParam(required = false) String busca) {
-		return produtoService.listar(categoria, busca);
+			@RequestParam(required = false) String busca, @RequestParam(required = false) List<String> ids) {
+		return produtoService.listar(categoria, busca, ids);
 	}
 
 	@GetMapping("/{id}")

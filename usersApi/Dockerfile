@@ -15,5 +15,5 @@ RUN --mount=type=cache,target=/root/.m2 ./mvnw -B -q -DskipTests package
 FROM eclipse-temurin:21-jre
 WORKDIR /app
 COPY --from=build /app/target/*.jar app.jar
-EXPOSE 3001
+EXPOSE 3000
 ENTRYPOINT ["java", "-jar", "/app/app.jar"]
