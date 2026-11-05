@@ -5,10 +5,13 @@ import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.startsWith;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyCollection;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -19,6 +22,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import java.math.BigDecimal;
 import java.util.Collection;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -31,7 +35,9 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
+import org.mockito.ArgumentCaptor;
 import org.springframework.http.MediaType;
+import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
@@ -42,6 +48,7 @@ import com.jayway.jsonpath.JsonPath;
 import br.com.ecommerce.pedidos.catalogo.CatalogoClient;
 import br.com.ecommerce.pedidos.catalogo.CatalogoIndisponivelException;
 import br.com.ecommerce.pedidos.catalogo.ProdutoCatalogo;
+import br.com.ecommerce.pedidos.evento.EstoqueListener;
 import br.com.ecommerce.pedidos.security.UsuarioLogado;
 
 @SpringBootTest
@@ -64,13 +71,22 @@ class PedidosApiTests {
 	@MockitoBean
 	CatalogoClient catalogo;
 
+	// O Kafka também: o teste vê o que seria publicado. Os listeners não ligam (application-test);
+	// o teste chama o listener direto, como o Kafka faria.
+	@MockitoBean
+	KafkaTemplate<String, String> kafka;
+
+	@Autowired
+	EstoqueListener estoqueListener;
+
 	// Cada teste é um cliente novo, com o carrinho vazio. Nos testes não há gateway:
 	// o teste faz o papel dele e manda X-User-Id e X-User-Email.
 	final UUID usuario = UUID.randomUUID();
 
 	@BeforeEach
-	void catalogoNoAr() {
+	void catalogoEKafkaNoAr() {
 		catalogoTem(livro(new BigDecimal("119.90")), celular());
+		when(kafka.send(anyString(), anyString(), anyString())).thenReturn(CompletableFuture.completedFuture(null));
 	}
 
 	// ---------- identidade ----------
@@ -231,12 +247,114 @@ class PedidosApiTests {
 	}
 
 	@Test
-	void checkoutSemEstoqueDevolve409() throws Exception {
+	void checkoutPublicaPedidoCriadoComOEnvelopeEAChaveDoPedido() throws Exception {
+		adicionar(LIVRO, 2).andExpect(status().isCreated());
+		adicionar(CELULAR, 1).andExpect(status().isCreated());
+
+		String resposta = mvc.perform(logado(post("/pedidos")).header(UsuarioLogado.REQUEST_ID, "3c37be51-checkout")
+				.contentType(MediaType.APPLICATION_JSON).content(CHECKOUT_CARTAO))
+			.andExpect(status().isAccepted())
+			.andReturn().getResponse().getContentAsString();
+		String pedidoId = JsonPath.read(resposta, "$.id");
+
+		ArgumentCaptor<String> mensagem = ArgumentCaptor.forClass(String.class);
+		verify(kafka).send(eq("pedidos"), eq(pedidoId), mensagem.capture());
+		String evento = mensagem.getValue();
+
+		assertThat(JsonPath.<String>read(evento, "$.tipo")).isEqualTo("pedido.criado");
+		assertThat(JsonPath.<String>read(evento, "$.pedidoId")).isEqualTo(pedidoId);
+		assertThat(JsonPath.<String>read(evento, "$.id")).isNotBlank();
+		assertThat(JsonPath.<String>read(evento, "$.ocorridoEm")).endsWith("Z");
+		// O X-Request-Id do Kong vira o correlationId do evento
+		assertThat(JsonPath.<String>read(evento, "$.correlationId")).isEqualTo("3c37be51-checkout");
+		assertThat(JsonPath.<String>read(evento, "$.dados.usuarioId")).isEqualTo(usuario.toString());
+		assertThat(JsonPath.<String>read(evento, "$.dados.clienteEmail")).isEqualTo("cliente@loja.com");
+		assertThat(JsonPath.<Double>read(evento, "$.dados.valorTotal")).isEqualTo(2239.70);
+		assertThat(JsonPath.<String>read(evento, "$.dados.formaPagamento")).isEqualTo("cartao");
+		assertThat(JsonPath.<String>read(evento, "$.dados.cartaoFinal")).isEqualTo("1111");
+		assertThat(JsonPath.<Integer>read(evento, "$.dados.itens.length()")).isEqualTo(2);
+		assertThat(evento).contains("\"produtoId\":\"" + CELULAR + "\"");
+		// O número do cartão nunca vai para o evento: ele fica guardado no tópico e muita gente lê
+		assertThat(evento).doesNotContain("4111111111111111");
+	}
+
+	@Test
+	void checkoutNaoConfereEstoqueQuemDecideEhOCatalogo() throws Exception {
 		adicionar(CELULAR, 5).andExpect(status().isCreated()); // o catálogo tem 2
 
 		checkout(CHECKOUT_CARTAO)
-			.andExpect(status().isConflict())
-			.andExpect(jsonPath("$.erro").value("Estoque insuficiente para Smartphone X."));
+			.andExpect(status().isAccepted())
+			.andExpect(jsonPath("$.status").value("AGUARDANDO_ESTOQUE"));
+	}
+
+	@Test
+	@ExtendWith(OutputCaptureExtension.class)
+	void kafkaForaOPedidoFicaGravadoEOErroVaiParaOLog(CapturedOutput saida) throws Exception {
+		when(kafka.send(anyString(), anyString(), anyString()))
+			.thenReturn(CompletableFuture.failedFuture(new IllegalStateException("broker fora")));
+		String pedidoId = criarPedido();
+
+		statusDoPedido(pedidoId).andExpect(jsonPath("$.status").value("AGUARDANDO_ESTOQUE"));
+		assertThat(saida.getOut()).contains("Pedido " + pedidoId + " gravado, mas o pedido.criado não foi publicado");
+	}
+
+	@Test
+	void checkoutQueFalhaNaoPublicaNada() throws Exception {
+		checkout(CHECKOUT_CARTAO).andExpect(status().isBadRequest()); // carrinho vazio
+
+		verify(kafka, never()).send(anyString(), anyString(), anyString());
+	}
+
+	// ---------- eventos do estoque ----------
+
+	@Test
+	void estoqueReservadoLevaParaAguardandoPagamentoERepetidoNaoFazNada() throws Exception {
+		String pedidoId = criarPedido();
+
+		eventoDoEstoque("estoque.reservado", pedidoId, "{\"valorTotal\":119.90}");
+		statusDoPedido(pedidoId).andExpect(jsonPath("$.status").value("AGUARDANDO_PAGAMENTO"));
+
+		// Pelo menos uma vez: o mesmo evento chega de novo
+		eventoDoEstoque("estoque.reservado", pedidoId, "{\"valorTotal\":119.90}");
+		statusDoPedido(pedidoId)
+			.andExpect(jsonPath("$.status").value("AGUARDANDO_PAGAMENTO"))
+			.andExpect(jsonPath("$.motivoCancelamento").doesNotExist());
+	}
+
+	@Test
+	void estoqueInsuficienteCancelaComOMotivo() throws Exception {
+		String pedidoId = criarPedido();
+
+		eventoDoEstoque("estoque.insuficiente", pedidoId,
+				"{\"motivo\":\"Estoque insuficiente para Effective Java.\",\"clienteEmail\":\"cliente@loja.com\"}");
+
+		statusDoPedido(pedidoId)
+			.andExpect(jsonPath("$.status").value("CANCELADO"))
+			.andExpect(jsonPath("$.motivoCancelamento").value("Estoque insuficiente para Effective Java."));
+	}
+
+	@Test
+	void eventoAtrasadoNaoLevaOPedidoParaTras() throws Exception {
+		String pedidoId = criarPedido();
+		mvc.perform(logado(post("/pedidos/" + pedidoId + "/cancelar"))).andExpect(status().isOk());
+
+		// O cliente cancelou antes de o catálogo responder: o reservado não "descancela"
+		eventoDoEstoque("estoque.reservado", pedidoId, "{}");
+
+		statusDoPedido(pedidoId)
+			.andExpect(jsonPath("$.status").value("CANCELADO"))
+			.andExpect(jsonPath("$.motivoCancelamento").value("Cancelado pelo cliente."));
+	}
+
+	@Test
+	void eventoDeOutroTipoOuDePedidoQueNaoExisteEhIgnorado() throws Exception {
+		String pedidoId = criarPedido();
+
+		eventoDoEstoque("estoque.qualquer-coisa", pedidoId, "{}");
+		eventoDoEstoque("estoque.reservado", UUID.randomUUID().toString(), "{}");
+		eventoDoEstoque("estoque.reservado", "nao-eh-uuid", "{}");
+
+		statusDoPedido(pedidoId).andExpect(jsonPath("$.status").value("AGUARDANDO_ESTOQUE"));
 	}
 
 	@Test
@@ -290,7 +408,8 @@ class PedidosApiTests {
 
 		mvc.perform(logado(post("/pedidos/" + pedidoId + "/cancelar")))
 			.andExpect(status().isOk())
-			.andExpect(jsonPath("$.status").value("CANCELADO"));
+			.andExpect(jsonPath("$.status").value("CANCELADO"))
+			.andExpect(jsonPath("$.motivoCancelamento").value("Cancelado pelo cliente."));
 
 		mvc.perform(logado(post("/pedidos/" + pedidoId + "/cancelar")))
 			.andExpect(status().isConflict())
@@ -338,6 +457,17 @@ class PedidosApiTests {
 		String resposta = checkout(CHECKOUT_CARTAO).andExpect(status().isAccepted())
 			.andReturn().getResponse().getContentAsString();
 		return JsonPath.read(resposta, "$.id");
+	}
+
+	private org.springframework.test.web.servlet.ResultActions statusDoPedido(String pedidoId) throws Exception {
+		return mvc.perform(logado(get("/pedidos/" + pedidoId))).andExpect(status().isOk());
+	}
+
+	// O que o Kafka entregaria ao listener: a mensagem como texto, no envelope
+	private void eventoDoEstoque(String tipo, String pedidoId, String dados) {
+		estoqueListener.receber("""
+				{"id":"%s","tipo":"%s","pedidoId":"%s","ocorridoEm":"2026-11-05T12:00:00Z",
+				 "correlationId":"teste-kafka","dados":%s}""".formatted(UUID.randomUUID(), tipo, pedidoId, dados));
 	}
 
 	private void catalogoTem(ProdutoCatalogo... produtos) {

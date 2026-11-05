@@ -1,8 +1,10 @@
 package br.com.ecommerce.pedidos.entity;
 
 /**
- * O pedido já nasce com os 4 estados. Nesta aula ele fica parado em AGUARDANDO_ESTOQUE;
- * quem o faz andar é o Kafka, nas próximas aulas (estoque reservado, pagamento aprovado).
+ * Cada seta é um evento, e só vale a partir do estado de origem:
+ * AGUARDANDO_ESTOQUE --estoque.reservado--> AGUARDANDO_PAGAMENTO --pagamento.aprovado--> PAGO
+ * AGUARDANDO_ESTOQUE --estoque.insuficiente--> CANCELADO
+ * O pagamento (e o PAGO) entra na próxima aula.
  */
 public enum StatusPedido {
 

@@ -2,6 +2,14 @@
 # Execute de cima para baixo: as requisições com "# @name" guardam a resposta
 # (token, ids) para as seguintes reaproveitarem.
 # Tudo passa pelo gateway (Kong): carrinho e pedidos são rotas de logado (401 sem token).
+#
+# Depois do checkout, o pedido anda sozinho, por eventos (Kafka):
+#   pedido.criado -> o catálogo reserva -> estoque.reservado / estoque.insuficiente -> o pedido muda de status
+# Para acompanhar:
+#   Kafka UI  http://localhost:8090  tópicos pedidos e estoque (mesma chave: o id do pedido)
+#   Mailpit   http://localhost:8025  "Recebemos o seu pedido" e "Seu pedido foi cancelado: sem estoque"
+#   Logs      docker compose logs | grep <X-Request-Id da resposta do checkout>
+#             (o mesmo id aparece no gateway, no pedidos, no catalogo e no notificacoes)
 
 @baseUrl = http://localhost:8080
 
@@ -91,6 +99,7 @@ Authorization: Bearer {{loginCliente.response.body.$.token}}
 # =====================================================================
 
 ### Checkout -> 202, status AGUARDANDO_ESTOQUE, só os 4 últimos dígitos do cartão
+# 202 Accepted: "recebi, ainda estou trabalhando". A reserva do estoque acontece depois, por evento.
 # @name pedido
 POST {{baseUrl}}/pedidos
 Authorization: Bearer {{loginCliente.response.body.$.token}}
@@ -119,7 +128,9 @@ Content-Type: application/json
   "formaPagamento": "pix"
 }
 
-### Consultar o pedido -> 200 com os itens (nome e preço copiados do catálogo)
+### Reenvie até mudar: AGUARDANDO_PAGAMENTO (o catálogo reservou: estoque.reservado)
+# Consistência eventual: o mesmo GET responde diferente em instantes diferentes.
+# Na vitrine, o estoque.disponivel do produto diminuiu e o reservado aumentou.
 GET {{baseUrl}}/pedidos/{{pedido.response.body.$.id}}
 Authorization: Bearer {{loginCliente.response.body.$.token}}
 
@@ -131,7 +142,8 @@ Authorization: Bearer {{loginCliente.response.body.$.token}}
 GET {{baseUrl}}/pedidos/{{pedido.response.body.$.id}}
 Authorization: Bearer {{loginAdmin.response.body.$.token}}
 
-### Cancelar o pedido -> 200, status CANCELADO
+### Cancelar o pedido -> 200, status CANCELADO, motivoCancelamento "Cancelado pelo cliente."
+# (devolver o estoque já reservado fica para a saga, na próxima aula)
 POST {{baseUrl}}/pedidos/{{pedido.response.body.$.id}}/cancelar
 Authorization: Bearer {{loginCliente.response.body.$.token}}
 
@@ -141,10 +153,11 @@ Authorization: Bearer {{loginCliente.response.body.$.token}}
 
 
 # =====================================================================
-# Erros do checkout
+# Sem estoque: o checkout aceita, o catálogo recusa, o pedido é cancelado
 # =====================================================================
 
 ### Preparar: muito mais unidades do que há em estoque -> 201
+# (o carrinho só avisa: "disponivel": false; quem decide é o catálogo, ao reservar)
 POST {{baseUrl}}/carrinho/itens
 Authorization: Bearer {{loginCliente.response.body.$.token}}
 Content-Type: application/json
@@ -158,7 +171,8 @@ Content-Type: application/json
 
 { "formaPagamento": "cheque", "numeroCartao": "123" }
 
-### ERRO: estoque insuficiente -> 409
+### Checkout sem estoque -> 202, AGUARDANDO_ESTOQUE (o checkout não confere estoque)
+# @name semEstoque
 POST {{baseUrl}}/pedidos
 Authorization: Bearer {{loginCliente.response.body.$.token}}
 Content-Type: application/json
@@ -168,8 +182,13 @@ Content-Type: application/json
   "formaPagamento": "pix"
 }
 
-### Limpar: tirar o item do carrinho -> 204
-DELETE {{baseUrl}}/carrinho/itens/{{vitrine.response.body.$[0].id}}
+### Reenvie até mudar: CANCELADO, com o motivoCancelamento (estoque.insuficiente)
+# Tudo ou nada: o estoque do produto não mudou. No Mailpit: "Seu pedido foi cancelado: sem estoque".
+GET {{baseUrl}}/pedidos/{{semEstoque.response.body.$.id}}
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+
+### ERRO: cancelar um pedido já cancelado pelo estoque -> 409
+POST {{baseUrl}}/pedidos/{{semEstoque.response.body.$.id}}/cancelar
 Authorization: Bearer {{loginCliente.response.body.$.token}}
 
 ### Preparar o teste do catálogo fora: 1 item no carrinho -> 201

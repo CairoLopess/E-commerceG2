@@ -1,5 +1,6 @@
-# Sobe o gateway, os serviços e os bancos: docker compose up --build
-# Só o gateway publica porta (8080). Dentro da rede, todo serviço escuta na 3000.
+# Sobe o gateway, os serviços, os bancos e o Kafka: docker compose up --build
+# Só o gateway publica porta para a API (8080). Dentro da rede, todo serviço HTTP escuta na 3000.
+# Ferramentas, só nesta máquina: Kafka UI (8090) e a caixa de entrada do Mailpit (8025).
 # Antes, copie .env.example para .env (o JWT_SECRET é obrigatório).
 
 services:
@@ -38,20 +39,28 @@ services:
     image: mongo:8
     volumes:
       - catalogo-db-data:/data/db
+    # O mongosh é um Node: com pouca memória (WSL com 2 GB e o Kafka no ar) ele leva mais de 10 s
+    # só para subir. Timeout folgado, senão o banco é dado como unhealthy e o catalogo não sobe.
     healthcheck:
       test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
-      interval: 5s
-      timeout: 5s
+      interval: 10s
+      timeout: 30s
       retries: 10
+      start_period: 30s
 
   catalogo:
     build: ./catalog-api
     environment:
       PORT: 3000
       MONGODB_URI: mongodb://catalogo-db:27017/catalogo
+      KAFKA_BROKERS: kafka:9092
     depends_on:
       catalogo-db:
         condition: service_healthy
+      kafka:
+        condition: service_healthy
+    # Ao parar, o consumer sai do grupo na hora e as partições passam para outra réplica
+    stop_grace_period: 10s
 
   # ---------- pedidos: Postgres próprio ----------
   pedidos-db:
@@ -77,11 +86,77 @@ services:
       DB_PASSWORD: ${DB_PASSWORD:-postgres}
       # Chamada direta pela rede interna, sem passar pelo gateway
       CATALOGO_URL: http://catalogo:3000
+      KAFKA_BROKERS: kafka:9092
     # Sem depends_on no catalogo de propósito: com o catálogo fora, o carrinho e a lista
     # de pedidos continuam funcionando; só o checkout responde 503.
     depends_on:
       pedidos-db:
         condition: service_healthy
+      kafka:
+        condition: service_healthy
+    stop_grace_period: 10s
+
+  # ---------- notificacoes: só escuta ----------
+  # Sem banco, sem porta, sem rota no Kong: ninguém chama, ninguém conhece.
+  notificacoes:
+    build: ./notification-api
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      SMTP_HOST: mailpit
+      SMTP_PORT: 1025
+    depends_on:
+      kafka:
+        condition: service_healthy
+      mailpit:
+        condition: service_started
+    stop_grace_period: 10s
+
+  # ---------- mensageria: Kafka (KRaft) ----------
+  # Um container faz tudo: broker e controller (KRaft, sem ZooKeeper). Um broker só, fator 1:
+  # ótimo para aprender, inaceitável em produção. Não publica porta: só a rede interna fala com ele.
+  kafka:
+    image: apache/kafka:3.8.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      # O endereço que o Kafka informa aos clientes: o nome na rede do compose
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
+      # Id fixo do cluster KRaft (qualquer UUID em base64); o mesmo em toda subida
+      CLUSTER_ID: 5L6g3nShT-eMCtK--X86sw
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 15s
+
+  # Tópicos, mensagens, grupos e lag: http://localhost:8090
+  kafka-ui:
+    image: kafbat/kafka-ui:v1.1.0
+    ports:
+      - "127.0.0.1:8090:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: ecommerce
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  # SMTP de mentira: recebe tudo e mostra em http://localhost:8025. Nada sai para a internet.
+  mailpit:
+    image: axllent/mailpit
+    ports:
+      - "127.0.0.1:8025:8025"   # caixa de entrada (o SMTP, 1025, fica só na rede interna)
 
   # ---------- gateway: Kong sem banco ----------
   # A única porta da API. Os serviços não publicam porta: só o gateway os alcança.

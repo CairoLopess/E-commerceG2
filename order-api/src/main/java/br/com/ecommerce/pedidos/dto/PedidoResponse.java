@@ -13,7 +13,8 @@ import br.com.ecommerce.pedidos.entity.Pedido;
 import br.com.ecommerce.pedidos.entity.StatusPedido;
 
 @JsonInclude(JsonInclude.Include.NON_NULL)
-public record PedidoResponse(UUID id, StatusPedido status, BigDecimal valorTotal, String clienteEmail,
+public record PedidoResponse(UUID id, StatusPedido status, String motivoCancelamento, BigDecimal valorTotal,
+		String clienteEmail,
 		EnderecoEntrega enderecoEntrega, String formaPagamento, String cartaoFinal, Instant criadoEm,
 		List<Item> itens) {
 
@@ -27,7 +28,8 @@ public record PedidoResponse(UUID id, StatusPedido status, BigDecimal valorTotal
 	}
 
 	public static PedidoResponse from(Pedido pedido) {
-		return new PedidoResponse(pedido.getId(), pedido.getStatus(), pedido.getValorTotal(), pedido.getClienteEmail(),
+		return new PedidoResponse(pedido.getId(), pedido.getStatus(), pedido.getMotivoCancelamento(),
+				pedido.getValorTotal(), pedido.getClienteEmail(),
 				pedido.getEnderecoEntrega(), pedido.getFormaPagamento(), pedido.getCartaoFinal(), pedido.getCriadoEm(),
 				pedido.getItens().stream().map(Item::from).toList());
 	}

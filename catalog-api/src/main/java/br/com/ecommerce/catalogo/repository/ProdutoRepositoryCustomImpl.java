@@ -7,6 +7,7 @@ import org.springframework.data.domain.Sort;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.data.mongodb.core.query.Query;
+import org.springframework.data.mongodb.core.query.Update;
 
 import br.com.ecommerce.catalogo.document.Produto;
 
@@ -34,6 +35,23 @@ class ProdutoRepositoryCustomImpl implements ProdutoRepositoryCustom {
 		}
 		Query query = Query.query(criteria).with(Sort.by("nome"));
 		return mongoTemplate.find(query, Produto.class);
+	}
+
+	@Override
+	public boolean reservar(String produtoId, int quantidade) {
+		// $gte no filtro: o Mongo só tira se houver
+		Query query = Query.query(Criteria.where("id").is(produtoId)
+				.and("ativo").is(true)
+				.and("estoque.disponivel").gte(quantidade));
+		Update update = new Update().inc("estoque.disponivel", -quantidade).inc("estoque.reservado", quantidade);
+		return mongoTemplate.updateFirst(query, update, Produto.class).getModifiedCount() == 1;
+	}
+
+	@Override
+	public void devolverReserva(String produtoId, int quantidade) {
+		Query query = Query.query(Criteria.where("id").is(produtoId));
+		Update update = new Update().inc("estoque.disponivel", quantidade).inc("estoque.reservado", -quantidade);
+		mongoTemplate.updateFirst(query, update, Produto.class);
 	}
 
 }
