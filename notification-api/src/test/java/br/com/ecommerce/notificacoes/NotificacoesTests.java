@@ -68,9 +68,43 @@ class NotificacoesTests {
 	}
 
 	@Test
+	void pagamentoAprovadoConfirmaOPedido() {
+		listener.receber(mensagem("pagamento.aprovado", """
+				{"usuarioId":"ana","clienteEmail":"cliente@loja.com","valor":2239.70,"codigoTransacao":"TX-F6A1",
+				 "tentativas":2}"""));
+
+		SimpleMailMessage email = enviado();
+		assertThat(email.getSubject()).isEqualTo("Pagamento aprovado: pedido confirmado");
+		assertThat(email.getText()).contains("Valor: R$ 2.239,70").contains("Transação: TX-F6A1");
+	}
+
+	@Test
+	void pagamentoRecusadoMandaOMotivo() {
+		listener.receber(mensagem("pagamento.recusado", """
+				{"usuarioId":"ana","clienteEmail":"cliente@loja.com","valor":60.00,
+				 "motivo":"banco indisponível (HTTP 503)","tentativas":3}"""));
+
+		SimpleMailMessage email = enviado();
+		assertThat(email.getSubject()).isEqualTo("Seu pedido foi cancelado: pagamento recusado");
+		assertThat(email.getText()).contains("Motivo: banco indisponível (HTTP 503)").contains("Nada foi cobrado");
+	}
+
+	@Test
+	void pagamentoEstornadoAvisaODinheiroDeVolta() {
+		listener.receber(mensagem("pagamento.estornado", """
+				{"usuarioId":"ana","clienteEmail":"cliente@loja.com","valor":60.00,"codigoTransacao":"TX-F6A1"}"""));
+
+		SimpleMailMessage email = enviado();
+		assertThat(email.getSubject()).isEqualTo("Seu pagamento foi estornado");
+		assertThat(email.getText()).contains("Valor devolvido: R$ 60,00").contains("Transação: TX-F6A1");
+	}
+
+	@Test
 	void eventosQueNaoInteressamNaoMandamEmail() {
-		// estoque.reservado: o cliente fica sabendo quando o pagamento for aprovado (próxima aula)
+		// estoque.reservado: o cliente fica sabendo quando o pagamento for aprovado
 		listener.receber(mensagem("estoque.reservado", "{\"clienteEmail\":\"cliente@loja.com\"}"));
+		// pedido.cancelado: foi o próprio cliente; se havia cobrança, vem o e-mail do estorno
+		listener.receber(mensagem("pedido.cancelado", "{\"clienteEmail\":\"cliente@loja.com\"}"));
 		// Sem e-mail no evento: não tem para quem mandar
 		listener.receber(mensagem("estoque.insuficiente", "{\"motivo\":\"x\"}"));
 

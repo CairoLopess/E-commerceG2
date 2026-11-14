@@ -49,6 +49,7 @@ import br.com.ecommerce.pedidos.catalogo.CatalogoClient;
 import br.com.ecommerce.pedidos.catalogo.CatalogoIndisponivelException;
 import br.com.ecommerce.pedidos.catalogo.ProdutoCatalogo;
 import br.com.ecommerce.pedidos.evento.EstoqueListener;
+import br.com.ecommerce.pedidos.evento.PagamentosListener;
 import br.com.ecommerce.pedidos.security.UsuarioLogado;
 
 @SpringBootTest
@@ -78,6 +79,9 @@ class PedidosApiTests {
 
 	@Autowired
 	EstoqueListener estoqueListener;
+
+	@Autowired
+	PagamentosListener pagamentosListener;
 
 	// Cada teste é um cliente novo, com o carrinho vazio. Nos testes não há gateway:
 	// o teste faz o papel dele e manda X-User-Id e X-User-Email.
@@ -357,6 +361,99 @@ class PedidosApiTests {
 		statusDoPedido(pedidoId).andExpect(jsonPath("$.status").value("AGUARDANDO_ESTOQUE"));
 	}
 
+	// ---------- eventos do pagamento (saga) ----------
+
+	@Test
+	void pagamentoAprovadoLevaParaPago() throws Exception {
+		String pedidoId = criarPedido();
+		eventoDoEstoque("estoque.reservado", pedidoId, "{}");
+
+		eventoDoPagamento("pagamento.aprovado", pedidoId, "{\"codigoTransacao\":\"TX-1\"}");
+
+		statusDoPedido(pedidoId).andExpect(jsonPath("$.status").value("PAGO"));
+	}
+
+	@Test
+	void pagamentoAprovadoAntesDoEstoqueReservadoTambemPagaEOReservadoAtrasadoNaoVoltaAtras() throws Exception {
+		String pedidoId = criarPedido();
+
+		// Tópicos diferentes: o pagamento pode terminar antes de o pedidos tratar o estoque.reservado
+		eventoDoPagamento("pagamento.aprovado", pedidoId, "{}");
+		eventoDoEstoque("estoque.reservado", pedidoId, "{}");
+
+		statusDoPedido(pedidoId).andExpect(jsonPath("$.status").value("PAGO"));
+	}
+
+	@Test
+	void pagamentoRecusadoCancelaComOMotivo() throws Exception {
+		String pedidoId = criarPedido();
+		eventoDoEstoque("estoque.reservado", pedidoId, "{}");
+
+		eventoDoPagamento("pagamento.recusado", pedidoId, "{\"motivo\":\"saldo insuficiente\"}");
+
+		statusDoPedido(pedidoId)
+			.andExpect(jsonPath("$.status").value("CANCELADO"))
+			.andExpect(jsonPath("$.motivoCancelamento").value("Pagamento recusado: saldo insuficiente."));
+	}
+
+	@Test
+	void canceladoNaoVoltaAPagoQuandoOBancoAprovaAtrasado() throws Exception {
+		String pedidoId = criarPedido();
+		eventoDoEstoque("estoque.reservado", pedidoId, "{}");
+		mvc.perform(logado(post("/pedidos/" + pedidoId + "/cancelar"))).andExpect(status().isOk());
+
+		eventoDoPagamento("pagamento.aprovado", pedidoId, "{}");
+
+		statusDoPedido(pedidoId)
+			.andExpect(jsonPath("$.status").value("CANCELADO"))
+			.andExpect(jsonPath("$.motivoCancelamento").value("Cancelado pelo cliente."));
+	}
+
+	@Test
+	void cancelarPublicaPedidoCanceladoComOQueOPagamentosPrecisa() throws Exception {
+		String pedidoId = criarPedido();
+		eventoDoEstoque("estoque.reservado", pedidoId, "{}");
+
+		mvc.perform(logado(post("/pedidos/" + pedidoId + "/cancelar")).header(UsuarioLogado.REQUEST_ID, "corr-cancela"))
+			.andExpect(status().isOk());
+
+		ArgumentCaptor<String> mensagem = ArgumentCaptor.forClass(String.class);
+		verify(kafka, org.mockito.Mockito.times(2)).send(eq("pedidos"), eq(pedidoId), mensagem.capture());
+		String evento = mensagem.getValue();
+		assertThat(JsonPath.<String>read(evento, "$.tipo")).isEqualTo("pedido.cancelado");
+		assertThat(JsonPath.<String>read(evento, "$.correlationId")).isEqualTo("corr-cancela");
+		assertThat(JsonPath.<String>read(evento, "$.dados.usuarioId")).isEqualTo(usuario.toString());
+		assertThat(JsonPath.<String>read(evento, "$.dados.clienteEmail")).isEqualTo("cliente@loja.com");
+		assertThat(JsonPath.<String>read(evento, "$.dados.motivo")).isEqualTo("Cancelado pelo cliente.");
+		assertThat(evento).contains("\"valorTotal\":119.90");
+	}
+
+	@Test
+	void kafkaForaNoCancelamentoDevolve503ENaoCancela() throws Exception {
+		String pedidoId = criarPedido();
+		when(kafka.send(anyString(), anyString(), anyString()))
+			.thenReturn(CompletableFuture.failedFuture(new IllegalStateException("Kafka fora")));
+
+		mvc.perform(logado(post("/pedidos/" + pedidoId + "/cancelar")))
+			.andExpect(status().isServiceUnavailable())
+			.andExpect(jsonPath("$.erro").value("Não foi possível cancelar agora. Tente de novo em instantes."));
+
+		// Rollback: o pedido continua como estava, e dá para tentar de novo
+		statusDoPedido(pedidoId)
+			.andExpect(jsonPath("$.status").value("AGUARDANDO_ESTOQUE"))
+			.andExpect(jsonPath("$.motivoCancelamento").doesNotExist());
+	}
+
+	@Test
+	void cancelarPedidoPagoDevolve409() throws Exception {
+		String pedidoId = criarPedido();
+		eventoDoPagamento("pagamento.aprovado", pedidoId, "{}");
+
+		mvc.perform(logado(post("/pedidos/" + pedidoId + "/cancelar")))
+			.andExpect(status().isConflict())
+			.andExpect(jsonPath("$.erro").value("Pedido com status PAGO não pode ser cancelado."));
+	}
+
 	@Test
 	void catalogoForaDevolve503NoCheckoutMasOCarrinhoEOsPedidosContinuam() throws Exception {
 		adicionar(LIVRO, 1).andExpect(status().isCreated());
@@ -467,6 +564,12 @@ class PedidosApiTests {
 	private void eventoDoEstoque(String tipo, String pedidoId, String dados) {
 		estoqueListener.receber("""
 				{"id":"%s","tipo":"%s","pedidoId":"%s","ocorridoEm":"2026-11-05T12:00:00Z",
+				 "correlationId":"teste-kafka","dados":%s}""".formatted(UUID.randomUUID(), tipo, pedidoId, dados));
+	}
+
+	private void eventoDoPagamento(String tipo, String pedidoId, String dados) {
+		pagamentosListener.receber("""
+				{"id":"%s","tipo":"%s","pedidoId":"%s","ocorridoEm":"2026-11-12T12:00:00Z",
 				 "correlationId":"teste-kafka","dados":%s}""".formatted(UUID.randomUUID(), tipo, pedidoId, dados));
 	}
 

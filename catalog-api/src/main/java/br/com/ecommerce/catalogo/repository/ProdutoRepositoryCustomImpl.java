@@ -54,4 +54,16 @@ class ProdutoRepositoryCustomImpl implements ProdutoRepositoryCustom {
 		mongoTemplate.updateFirst(query, update, Produto.class);
 	}
 
+	@Override
+	public void confirmarVenda(String produtoId, int quantidade) {
+		Query query = Query.query(Criteria.where("id").is(produtoId));
+		mongoTemplate.updateFirst(query, new Update().inc("estoque.reservado", -quantidade), Produto.class);
+	}
+
+	@Override
+	public void devolverVenda(String produtoId, int quantidade) {
+		Query query = Query.query(Criteria.where("id").is(produtoId));
+		mongoTemplate.updateFirst(query, new Update().inc("estoque.disponivel", quantidade), Produto.class);
+	}
+
 }

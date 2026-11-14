@@ -6,7 +6,7 @@ import org.springframework.data.mongodb.repository.MongoRepository;
 
 import br.com.ecommerce.catalogo.document.Reserva;
 
-public interface ReservaRepository extends MongoRepository<Reserva, String> {
+public interface ReservaRepository extends MongoRepository<Reserva, String>, ReservaRepositoryCustom {
 
 	Optional<Reserva> findByPedidoId(String pedidoId);
 

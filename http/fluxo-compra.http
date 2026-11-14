@@ -1,0 +1,215 @@
+# A saga da compra, do checkout ao pagamento — rode com a extensão REST Client do VS Code.
+# Execute de cima para baixo: as requisições com "# @name" guardam a resposta para as seguintes.
+#
+#   pedidos --pedido.criado--> catalogo --estoque.reservado--> pagamentos --HTTP--> banco-falso
+#      ^                                                            |
+#      +----------- pagamento.aprovado / recusado / estornado ------+---> catalogo, notificacoes
+#
+# Três compras:
+#   1. aprovada            -> pedido PAGO, pagamento APROVADO, o estoque sai do reservado
+#   2. cartão final 0002   -> pedido CANCELADO, pagamento RECUSADO, o estoque VOLTA (compensação)
+#   3. cancelada no meio   -> pagamento ESTORNADO (ou CANCELADO), o estoque volta
+#
+# Para acompanhar:
+#   Mailpit   http://localhost:8025   "Pagamento aprovado", "pagamento recusado", "estornado"
+#   Kafka UI  http://localhost:8090   tópico pagamentos
+#   Logs      docker compose logs pagamentos banco-falso catalogo | grep <id do pedido>
+
+@baseUrl = http://localhost:8080
+@banco = http://localhost:9000
+
+### Health do pagamentos: banco ok e circuito fechado -> 200
+GET {{baseUrl}}/health/pagamentos
+
+### Banco-falso no normal (sem latência, sem falhas) -> 200
+POST {{banco}}/config
+Content-Type: application/json
+
+{ "latenciaMs": 0, "falhaPercent": 0 }
+
+### Login do cliente (seed) -> 200
+# @name loginCliente
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{ "email": "cliente@loja.com", "senha": "cliente123" }
+
+### Login do admin (seed) -> 200
+# @name loginAdmin
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{ "email": "admin@loja.com", "senha": "admin123" }
+
+### Vitrine: anote o estoque do 1º produto { disponivel, reservado }
+# @name vitrine
+GET {{baseUrl}}/produtos
+
+
+# =====================================================================
+# 1. Compra aprovada: cartão 4111...
+# =====================================================================
+
+### 2 unidades do 1º produto -> 201
+POST {{baseUrl}}/carrinho/itens
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+Content-Type: application/json
+
+{ "produtoId": "{{vitrine.response.body.$[0].id}}", "quantidade": 2 }
+
+### Checkout com cartão -> 202, AGUARDANDO_ESTOQUE
+# @name aprovada
+POST {{baseUrl}}/pedidos
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+Content-Type: application/json
+
+{
+  "enderecoEntrega": { "cep": "90010-000", "logradouro": "Rua dos Andradas", "numero": "100",
+                       "cidade": "Porto Alegre", "uf": "RS" },
+  "formaPagamento": "cartao",
+  "numeroCartao": "4111111111111111"
+}
+
+### Reenvie até mudar: PAGO (estoque.reservado -> cobrança -> pagamento.aprovado)
+GET {{baseUrl}}/pedidos/{{aprovada.response.body.$.id}}
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+
+### O pagamento do pedido -> 200, APROVADO, tentativas 1, codigoTransacao TX-...
+GET {{baseUrl}}/pagamentos/{{aprovada.response.body.$.id}}
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+
+### O estoque: disponivel 2 a menos que antes, reservado igual a antes (a venda saiu do reservado)
+GET {{baseUrl}}/produtos/{{vitrine.response.body.$[0].id}}
+
+### ERRO: cancelar um pedido PAGO -> 409
+POST {{baseUrl}}/pedidos/{{aprovada.response.body.$.id}}/cancelar
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+
+
+# =====================================================================
+# 2. Cartão recusado: final 0002 (saldo insuficiente)
+# =====================================================================
+
+### 1 unidade do 1º produto -> 201
+POST {{baseUrl}}/carrinho/itens
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+Content-Type: application/json
+
+{ "produtoId": "{{vitrine.response.body.$[0].id}}", "quantidade": 1 }
+
+### Checkout com o cartão que o banco recusa -> 202
+# @name recusada
+POST {{baseUrl}}/pedidos
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+Content-Type: application/json
+
+{
+  "enderecoEntrega": { "cep": "90010-000", "logradouro": "Rua A", "cidade": "Porto Alegre", "uf": "RS" },
+  "formaPagamento": "cartao",
+  "numeroCartao": "4000000000000002"
+}
+
+### Reenvie até mudar: CANCELADO, motivoCancelamento "Pagamento recusado: saldo insuficiente."
+GET {{baseUrl}}/pedidos/{{recusada.response.body.$.id}}
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+
+### O pagamento -> 200, RECUSADO, tentativas 1 (402 não tem retry), motivo "saldo insuficiente"
+GET {{baseUrl}}/pagamentos/{{recusada.response.body.$.id}}
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+
+### O estoque VOLTOU: o mesmo disponivel do fim da compra 1 (compensação: pagamento.recusado -> catálogo devolve)
+GET {{baseUrl}}/produtos/{{vitrine.response.body.$[0].id}}
+
+
+# =====================================================================
+# 3. Cancelada no meio da cobrança: estorno
+# =====================================================================
+
+### Preparar: o banco leva 1,5 s para responder (ainda dentro do timeout de 2 s)
+POST {{banco}}/config
+Content-Type: application/json
+
+{ "latenciaMs": 1500 }
+
+### 1 unidade do 1º produto -> 201
+POST {{baseUrl}}/carrinho/itens
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+Content-Type: application/json
+
+{ "produtoId": "{{vitrine.response.body.$[0].id}}", "quantidade": 1 }
+
+### Checkout com pix -> 202 (e mande o próximo LOGO EM SEGUIDA, antes de 1,5 s)
+# @name cancelada
+POST {{baseUrl}}/pedidos
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+Content-Type: application/json
+
+{
+  "enderecoEntrega": { "cep": "90010-000", "logradouro": "Rua A", "cidade": "Porto Alegre", "uf": "RS" },
+  "formaPagamento": "pix"
+}
+
+### Cancelar enquanto o banco cobra -> 200, CANCELADO (publica pedido.cancelado)
+POST {{baseUrl}}/pedidos/{{cancelada.response.body.$.id}}/cancelar
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+
+### Reenvie até sair de PENDENTE: ESTORNADO (o banco aprovou, o pagamentos estornou)
+# ou CANCELADO (o cancelamento chegou antes da cobrança: o banco nem foi chamado).
+# Os dois finais estão certos: ninguém fica pagando por um pedido cancelado.
+GET {{baseUrl}}/pagamentos/{{cancelada.response.body.$.id}}
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+
+### O pedido continua CANCELADO: o pagamento.aprovado atrasado não o leva para PAGO
+GET {{baseUrl}}/pedidos/{{cancelada.response.body.$.id}}
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+
+### O estoque voltou de novo: o mesmo disponivel do fim da compra 1
+GET {{baseUrl}}/produtos/{{vitrine.response.body.$[0].id}}
+
+### Banco de volta ao normal -> 200
+POST {{banco}}/config
+Content-Type: application/json
+
+{ "latenciaMs": 0, "falhaPercent": 0 }
+
+
+# =====================================================================
+# Quem vê qual pagamento
+# =====================================================================
+
+### Outro cliente: cadastro (e-mail aleatório) -> 201
+# @name outroCliente
+POST {{baseUrl}}/usuarios
+Content-Type: application/json
+
+{ "nome": "Bia", "email": "bia-{{$randomInt 1000 999999}}@loja.com", "senha": "segredo123" }
+
+### Login do outro cliente -> 200
+# @name loginOutro
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{ "email": "{{outroCliente.response.body.$.email}}", "senha": "segredo123" }
+
+### ERRO: outro cliente vendo o pagamento de quem comprou -> 404 (nem confirma que existe)
+GET {{baseUrl}}/pagamentos/{{aprovada.response.body.$.id}}
+Authorization: Bearer {{loginOutro.response.body.$.token}}
+
+### Admin vê o pagamento de qualquer pedido -> 200
+GET {{baseUrl}}/pagamentos/{{aprovada.response.body.$.id}}
+Authorization: Bearer {{loginAdmin.response.body.$.token}}
+
+### Admin lista todos -> 200
+GET {{baseUrl}}/pagamentos
+Authorization: Bearer {{loginAdmin.response.body.$.token}}
+
+### ERRO: cliente listando todos -> 403
+GET {{baseUrl}}/pagamentos
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+
+### ERRO: sem token -> 401 (o Kong barra)
+GET {{baseUrl}}/pagamentos/{{aprovada.response.body.$.id}}
+
+### ERRO: pagamento que não existe -> 404
+GET {{baseUrl}}/pagamentos/00000000-0000-0000-0000-000000000000
+Authorization: Bearer {{loginCliente.response.body.$.token}}

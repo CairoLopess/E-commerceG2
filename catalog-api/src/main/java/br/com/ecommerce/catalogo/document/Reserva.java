@@ -11,12 +11,19 @@ import org.springframework.data.mongodb.core.mapping.Document;
  * Coleção reservas: uma por pedido, com os itens. O índice único em pedidoId é a idempotência:
  * o mesmo pedido.criado entregue duas vezes não reserva duas vezes (o 2º insert dá chave
  * duplicada). O status guarda o resultado, para republicá-lo se o evento vier de novo.
+ *
+ * Depois da reserva, a saga decide o fim:
+ *   RESERVADO --pagamento.aprovado--> CONFIRMADO (vendido: sai do reservado)
+ *   RESERVADO --pagamento.recusado / pedido.cancelado--> LIBERADO (volta ao disponível)
+ *   CONFIRMADO --pedido.cancelado--> LIBERADO (cancelou enquanto o banco aprovava: o pagamento
+ *                                    estorna e o estoque volta)
+ * O status de origem vai no filtro do update: evento repetido não devolve duas vezes.
  */
 @Document("reservas")
 public class Reserva {
 
 	public enum Status {
-		PROCESSANDO, RESERVADO, INSUFICIENTE
+		PROCESSANDO, RESERVADO, INSUFICIENTE, CONFIRMADO, LIBERADO
 	}
 
 	public record Item(String produtoId, int quantidade) {

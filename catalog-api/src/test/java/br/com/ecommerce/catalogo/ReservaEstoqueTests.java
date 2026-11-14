@@ -34,6 +34,7 @@ import com.jayway.jsonpath.JsonPath;
 
 import br.com.ecommerce.catalogo.document.Estoque;
 import br.com.ecommerce.catalogo.document.Produto;
+import br.com.ecommerce.catalogo.evento.PagamentosListener;
 import br.com.ecommerce.catalogo.evento.PedidosListener;
 import br.com.ecommerce.catalogo.repository.ProdutoRepository;
 import br.com.ecommerce.catalogo.repository.ReservaRepository;
@@ -75,6 +76,9 @@ class ReservaEstoqueTests {
 
 	@Autowired
 	PedidosListener listener;
+
+	@Autowired
+	PagamentosListener pagamentosListener;
 
 	@Autowired
 	ProdutoRepository produtos;
@@ -187,13 +191,104 @@ class ReservaEstoqueTests {
 		String livro = produto("Effective Java", 10);
 		String pedidoId = UUID.randomUUID().toString();
 
-		listener.receber(mensagem("pedido.cancelado", pedidoId, "{}"));
+		listener.receber(mensagem("pedido.qualquer-coisa", pedidoId, "{}"));
 
 		assertThat(estoque(livro)).isEqualTo(new Estoque(10, 0));
 		verify(kafka, never()).send(anyString(), anyString(), anyString());
 	}
 
+	// ---------- fim da saga: confirmar ou devolver ----------
+
+	@Test
+	void pagamentoAprovadoConfirmaAVendaERepetidoNaoFazNada() {
+		String livro = produto("Effective Java", 10);
+		String pedidoId = UUID.randomUUID().toString();
+		pedidoCriado(pedidoId, item(livro, 2));
+
+		pagamento("pagamento.aprovado", pedidoId);
+		pagamento("pagamento.aprovado", pedidoId);
+
+		// Vendido: sai do reservado; o disponivel já tinha diminuído na reserva
+		assertThat(estoque(livro)).isEqualTo(new Estoque(8, 0));
+		assertThat(statusDaReserva(pedidoId)).isEqualTo("CONFIRMADO");
+	}
+
+	@Test
+	void pagamentoRecusadoDevolveOEstoqueUmaVezSo() {
+		String livro = produto("Effective Java", 10);
+		String celular = produto("Smartphone X", 5);
+		String pedidoId = UUID.randomUUID().toString();
+		pedidoCriado(pedidoId, item(livro, 2), item(celular, 1));
+
+		pagamento("pagamento.recusado", pedidoId);
+		// Repetido, e o cancelamento chegando também: a reserva já foi liberada, nada acontece
+		pagamento("pagamento.recusado", pedidoId);
+		listener.receber(mensagem("pedido.cancelado", pedidoId, "{}"));
+
+		assertThat(estoque(livro)).isEqualTo(new Estoque(10, 0));
+		assertThat(estoque(celular)).isEqualTo(new Estoque(5, 0));
+		assertThat(statusDaReserva(pedidoId)).isEqualTo("LIBERADO");
+	}
+
+	@Test
+	void pedidoCanceladoDevolveOEstoqueReservado() {
+		String livro = produto("Effective Java", 10);
+		String pedidoId = UUID.randomUUID().toString();
+		pedidoCriado(pedidoId, item(livro, 3));
+
+		listener.receber(mensagem("pedido.cancelado", pedidoId, "{}"));
+
+		assertThat(estoque(livro)).isEqualTo(new Estoque(10, 0));
+	}
+
+	@Test
+	void canceladoDepoisDaVendaConfirmadaVoltaAoDisponivel() {
+		String livro = produto("Effective Java", 10);
+		String pedidoId = UUID.randomUUID().toString();
+		pedidoCriado(pedidoId, item(livro, 2));
+
+		// O cliente cancelou enquanto o banco aprovava: o pagamentos estorna, o estoque volta
+		pagamento("pagamento.aprovado", pedidoId);
+		listener.receber(mensagem("pedido.cancelado", pedidoId, "{}"));
+
+		assertThat(estoque(livro)).isEqualTo(new Estoque(10, 0));
+	}
+
+	@Test
+	void aprovadoDepoisDoCancelamentoNaoConfirma() {
+		String livro = produto("Effective Java", 10);
+		String pedidoId = UUID.randomUUID().toString();
+		pedidoCriado(pedidoId, item(livro, 2));
+
+		listener.receber(mensagem("pedido.cancelado", pedidoId, "{}"));
+		pagamento("pagamento.aprovado", pedidoId);
+
+		assertThat(estoque(livro)).isEqualTo(new Estoque(10, 0));
+		assertThat(statusDaReserva(pedidoId)).isEqualTo("LIBERADO");
+	}
+
+	@Test
+	void semReservaNaoHaNadaADevolver() {
+		String celular = produto("Smartphone X Pro", 5);
+		String pedidoId = UUID.randomUUID().toString();
+		pedidoCriado(pedidoId, item(celular, 6)); // insuficiente: nada reservado
+
+		pagamento("pagamento.recusado", pedidoId);
+		pagamento("pagamento.recusado", UUID.randomUUID().toString()); // pedido que o catálogo nem conhece
+
+		assertThat(estoque(celular)).isEqualTo(new Estoque(5, 0));
+		assertThat(statusDaReserva(pedidoId)).isEqualTo("INSUFICIENTE");
+	}
+
 	// ---------- apoio ----------
+
+	private void pagamento(String tipo, String pedidoId) {
+		pagamentosListener.receber(mensagem(tipo, pedidoId, "{\"clienteEmail\":\"cliente@loja.com\"}"));
+	}
+
+	private String statusDaReserva(String pedidoId) {
+		return reservas.findByPedidoId(pedidoId).orElseThrow().getStatus().name();
+	}
 
 	private String produto(String nome, int disponivel) {
 		Produto produto = new Produto("RES-" + UUID.randomUUID().toString().substring(0, 8), nome, "livros",

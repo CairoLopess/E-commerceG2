@@ -16,6 +16,7 @@ public class KafkaConfig {
 
 	public static final String TOPICO_PEDIDOS = "pedidos";
 	public static final String TOPICO_ESTOQUE = "estoque";
+	public static final String TOPICO_PAGAMENTOS = "pagamentos";
 
 	// 3 partições: até 3 réplicas de um serviço dividem o trabalho. Réplicas: o padrão do broker
 	// (1 na docker-compose, que só tem um broker).
@@ -27,6 +28,11 @@ public class KafkaConfig {
 	@Bean
 	NewTopic topicoEstoque() {
 		return TopicBuilder.name(TOPICO_ESTOQUE).partitions(3).build();
+	}
+
+	@Bean
+	NewTopic topicoPagamentos() {
+		return TopicBuilder.name(TOPICO_PAGAMENTOS).partitions(3).build();
 	}
 
 	/**

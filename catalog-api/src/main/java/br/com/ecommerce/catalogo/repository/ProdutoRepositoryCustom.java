@@ -19,4 +19,10 @@ public interface ProdutoRepositoryCustom {
 	// O contrário do reservar: devolve ao disponível o que tinha sido reservado
 	void devolverReserva(String produtoId, int quantidade);
 
+	// Pagamento aprovado: o reservado vira venda e sai do reservado (o disponivel já tinha diminuído)
+	void confirmarVenda(String produtoId, int quantidade);
+
+	// Venda desfeita depois de confirmada (cancelado durante a cobrança): volta ao disponível
+	void devolverVenda(String produtoId, int quantidade);
+
 }

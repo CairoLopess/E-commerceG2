@@ -9,7 +9,8 @@ import org.springframework.stereotype.Component;
 import br.com.ecommerce.catalogo.service.ReservaService;
 
 /**
- * O catálogo escuta o tópico pedidos. Só pedido.criado interessa: o resto é ignorado.
+ * O catálogo escuta o tópico pedidos: pedido.criado (reserva) e pedido.cancelado (devolve o
+ * estoque, compensação). O resto é ignorado.
  * groupId = nome do serviço: com 3 réplicas do catálogo, cada uma fica com uma partição.
  */
 @Component
@@ -21,7 +22,8 @@ public class PedidosListener {
 	public PedidosListener(Eventos eventos, ReservaService reservas) {
 		this.eventos = eventos;
 		this.handlers = Map.of(
-				"pedido.criado", e -> reservas.reservar(e.pedidoId(), eventos.dados(e, PedidoCriado.class)));
+				"pedido.criado", e -> reservas.reservar(e.pedidoId(), eventos.dados(e, PedidoCriado.class)),
+				"pedido.cancelado", e -> reservas.liberar(e.pedidoId(), "pedido cancelado"));
 	}
 
 	@KafkaListener(topics = KafkaConfig.TOPICO_PEDIDOS, groupId = "catalogo")

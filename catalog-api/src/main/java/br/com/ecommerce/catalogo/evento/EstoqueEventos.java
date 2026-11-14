@@ -6,7 +6,7 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 
 /**
  * Os dados dos eventos que o catálogo publica no tópico estoque. Repassam o que veio no
- * pedido.criado: quem escuta (pedidos, notificações e, na próxima aula, pagamentos) trabalha só
+ * pedido.criado: quem escuta (pedidos, pagamentos e notificações) trabalha só
  * com o evento, sem consultar ninguém.
  */
 public final class EstoqueEventos {

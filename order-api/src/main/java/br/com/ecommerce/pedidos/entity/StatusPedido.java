@@ -4,7 +4,9 @@ package br.com.ecommerce.pedidos.entity;
  * Cada seta é um evento, e só vale a partir do estado de origem:
  * AGUARDANDO_ESTOQUE --estoque.reservado--> AGUARDANDO_PAGAMENTO --pagamento.aprovado--> PAGO
  * AGUARDANDO_ESTOQUE --estoque.insuficiente--> CANCELADO
- * O pagamento (e o PAGO) entra na próxima aula.
+ * AGUARDANDO_ESTOQUE ou AGUARDANDO_PAGAMENTO --pagamento.recusado--> CANCELADO
+ * AGUARDANDO_ESTOQUE ou AGUARDANDO_PAGAMENTO --cliente cancela--> CANCELADO (publica pedido.cancelado)
+ * PAGO e CANCELADO são finais: um CANCELADO não volta a PAGO porque o banco aprovou atrasado.
  */
 public enum StatusPedido {
 

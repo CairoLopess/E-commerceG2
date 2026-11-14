@@ -8,6 +8,7 @@ import java.util.UUID;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -22,6 +23,7 @@ import br.com.ecommerce.pedidos.entity.Pedido;
 import br.com.ecommerce.pedidos.entity.StatusPedido;
 import br.com.ecommerce.pedidos.evento.Eventos;
 import br.com.ecommerce.pedidos.evento.KafkaConfig;
+import br.com.ecommerce.pedidos.evento.PedidoCancelado;
 import br.com.ecommerce.pedidos.evento.PedidoCriado;
 import br.com.ecommerce.pedidos.exception.ApiException;
 import br.com.ecommerce.pedidos.repository.CarrinhoItemRepository;
@@ -31,6 +33,8 @@ import br.com.ecommerce.pedidos.repository.PedidoRepository;
 public class PedidoService {
 
 	private static final String NAO_ENCONTRADO = "Pedido não encontrado.";
+
+	private static final String MOTIVO_CLIENTE = "Cancelado pelo cliente.";
 
 	private static final Set<StatusPedido> CANCELAVEIS = Set.of(StatusPedido.AGUARDANDO_ESTOQUE,
 			StatusPedido.AGUARDANDO_PAGAMENTO);
@@ -110,17 +114,31 @@ public class PedidoService {
 	}
 
 	/**
-	 * Cancelar continua permitido em AGUARDANDO_ESTOQUE e AGUARDANDO_PAGAMENTO, com o mesmo UPDATE
+	 * Cancelar é permitido em AGUARDANDO_ESTOQUE e AGUARDANDO_PAGAMENTO, com o mesmo UPDATE
 	 * condicional dos eventos: se um evento mudou o status entre a leitura e o UPDATE, dá 409.
-	 * Devolver o estoque de um pedido já reservado fica para a saga, na próxima aula.
+	 * Depois de PAGO, não (409): o estorno só acontece quando o pagamento termina depois de um
+	 * cancelamento.
+	 *
+	 * Publica pedido.cancelado ANTES do commit, ao contrário do checkout: se o Kafka estiver fora,
+	 * o cancelamento é desfeito (rollback) e o cliente recebe 503. Melhor que um pedido CANCELADO que
+	 * ninguém fica sabendo, com o estoque preso e a cobrança seguindo em frente.
 	 */
 	@Transactional
 	public PedidoResponse cancelar(UUID usuarioId, UUID id) {
 		Pedido pedido = buscarDoUsuario(usuarioId, id);
 		if (!pedido.getStatus().podeCancelar()
-				|| pedidoRepository.mudarStatus(id, StatusPedido.CANCELADO, CANCELAVEIS, "Cancelado pelo cliente.") == 0) {
+				|| pedidoRepository.mudarStatus(id, StatusPedido.CANCELADO, CANCELAVEIS, MOTIVO_CLIENTE) == 0) {
 			throw ApiException.conflito("Pedido com status " + pedido.getStatus() + " não pode ser cancelado.");
 		}
+		try {
+			eventos.publicar(KafkaConfig.TOPICO_PEDIDOS, "pedido.cancelado", id.toString(),
+					PedidoCancelado.from(pedido, MOTIVO_CLIENTE));
+		} catch (RuntimeException e) {
+			log.error("Pedido {}: pedido.cancelado não publicado, cancelamento desfeito", id, e);
+			throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE,
+					"Não foi possível cancelar agora. Tente de novo em instantes.");
+		}
+		log.info("Pedido {} cancelado pelo cliente (estava {})", id, pedido.getStatus());
 		return PedidoResponse.from(buscarDoUsuario(usuarioId, id));
 	}
 

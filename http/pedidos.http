@@ -5,9 +5,10 @@
 #
 # Depois do checkout, o pedido anda sozinho, por eventos (Kafka):
 #   pedido.criado -> o catálogo reserva -> estoque.reservado / estoque.insuficiente -> o pedido muda de status
+#   estoque.reservado -> o pagamentos cobra no banco-falso -> pagamento.aprovado / recusado -> PAGO / CANCELADO
 # Para acompanhar:
 #   Kafka UI  http://localhost:8090  tópicos pedidos e estoque (mesma chave: o id do pedido)
-#   Mailpit   http://localhost:8025  "Recebemos o seu pedido" e "Seu pedido foi cancelado: sem estoque"
+#   Mailpit   http://localhost:8025  "Recebemos o seu pedido", "Pagamento aprovado" e "Seu pedido foi cancelado: sem estoque"
 #   Logs      docker compose logs | grep <X-Request-Id da resposta do checkout>
 #             (o mesmo id aparece no gateway, no pedidos, no catalogo e no notificacoes)
 
@@ -128,9 +129,8 @@ Content-Type: application/json
   "formaPagamento": "pix"
 }
 
-### Reenvie até mudar: AGUARDANDO_PAGAMENTO (o catálogo reservou: estoque.reservado)
+### Reenvie até mudar: AGUARDANDO_PAGAMENTO (o catálogo reservou) e logo depois PAGO (o pagamentos cobrou)
 # Consistência eventual: o mesmo GET responde diferente em instantes diferentes.
-# Na vitrine, o estoque.disponivel do produto diminuiu e o reservado aumentou.
 GET {{baseUrl}}/pedidos/{{pedido.response.body.$.id}}
 Authorization: Bearer {{loginCliente.response.body.$.token}}
 
@@ -142,13 +142,14 @@ Authorization: Bearer {{loginCliente.response.body.$.token}}
 GET {{baseUrl}}/pedidos/{{pedido.response.body.$.id}}
 Authorization: Bearer {{loginAdmin.response.body.$.token}}
 
-### Cancelar o pedido -> 200, status CANCELADO, motivoCancelamento "Cancelado pelo cliente."
-# (devolver o estoque já reservado fica para a saga, na próxima aula)
+### ERRO: cancelar o pedido já PAGO -> 409
+# (Antes de pago, o cancelar dá 200 e publica pedido.cancelado: o catálogo devolve o estoque e o
+# pagamentos estorna ou bloqueia a cobrança. Esse caminho está em fluxo-compra.http, compra 3.)
 POST {{baseUrl}}/pedidos/{{pedido.response.body.$.id}}/cancelar
 Authorization: Bearer {{loginCliente.response.body.$.token}}
 
-### ERRO: cancelar de novo -> 409 (o status não permite)
-POST {{baseUrl}}/pedidos/{{pedido.response.body.$.id}}/cancelar
+### O pagamento do pedido -> 200, APROVADO (rotas de pagamentos: fluxo-compra.http)
+GET {{baseUrl}}/pagamentos/{{pedido.response.body.$.id}}
 Authorization: Bearer {{loginCliente.response.body.$.token}}
 
 

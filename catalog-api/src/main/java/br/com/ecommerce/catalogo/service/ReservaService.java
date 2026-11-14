@@ -2,6 +2,7 @@ package br.com.ecommerce.catalogo.service;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -25,6 +26,8 @@ import br.com.ecommerce.catalogo.repository.ReservaRepository;
  * 2. Tudo ou nada: cada item só sai do disponível se houver (update com $gte). Faltou um, devolve
  *    os que já tinha tirado e publica estoque.insuficiente.
  * 3. Deu tudo certo: publica estoque.reservado.
+ *
+ * E as reações ao fim da saga (confirmar e liberar), cada uma só a partir do status esperado.
  */
 @Service
 public class ReservaService {
@@ -102,6 +105,42 @@ public class ReservaService {
 			eventos.publicar(KafkaConfig.TOPICO_ESTOQUE, EstoqueEventos.INSUFICIENTE, pedidoId,
 					EstoqueEventos.Insuficiente.de(pedido, reserva.getMotivo()));
 		}
+	}
+
+	/**
+	 * pagamento.aprovado: a reserva vira venda. O produto sai do reservado (o disponivel já tinha
+	 * diminuído na reserva). Só de RESERVADO: repetido, ou depois de liberada, não faz nada.
+	 */
+	public void confirmar(String pedidoId) {
+		reservas.mudarStatus(pedidoId, Set.of(Reserva.Status.RESERVADO), Reserva.Status.CONFIRMADO)
+			.ifPresentOrElse(reserva -> {
+				reserva.getItens().forEach(item -> produtos.confirmarVenda(item.produtoId(), item.quantidade()));
+				log.info("Pedido {}: venda confirmada, {} itens saíram do reservado", pedidoId, reserva.getItens().size());
+			}, () -> log.info("Pedido {}: nada a confirmar (sem reserva RESERVADO)", pedidoId));
+	}
+
+	/**
+	 * COMPENSAÇÃO (pagamento.recusado e pedido.cancelado): devolve o estoque ao disponível. A mesma
+	 * função para os dois: o catálogo não precisa saber por que o pedido falhou.
+	 *
+	 * De RESERVADO: disponivel aumenta, reservado diminui. De CONFIRMADO (o cliente cancelou enquanto
+	 * o banco aprovava; o pagamentos estorna): só o disponivel aumenta. Repetido: a reserva já está
+	 * LIBERADO, nada acontece. INSUFICIENTE: nada foi reservado, nada a devolver.
+	 */
+	public void liberar(String pedidoId, String porque) {
+		reservas.mudarStatus(pedidoId, Set.of(Reserva.Status.RESERVADO, Reserva.Status.CONFIRMADO),
+				Reserva.Status.LIBERADO)
+			.ifPresentOrElse(reserva -> {
+				for (Reserva.Item item : reserva.getItens()) {
+					if (reserva.getStatus() == Reserva.Status.CONFIRMADO) {
+						produtos.devolverVenda(item.produtoId(), item.quantidade());
+					} else {
+						produtos.devolverReserva(item.produtoId(), item.quantidade());
+					}
+				}
+				log.info("Pedido {}: COMPENSAÇÃO ({}), estoque devolvido ({} itens, estava {})", pedidoId, porque,
+						reserva.getItens().size(), reserva.getStatus());
+			}, () -> log.info("Pedido {}: nada a devolver ({}): sem reserva ativa", pedidoId, porque));
 	}
 
 	// O texto que vai para o pedido (motivoCancelamento) e para o e-mail do cliente

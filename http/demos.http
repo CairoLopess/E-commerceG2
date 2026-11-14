@@ -1,0 +1,224 @@
+# Resiliência ao vivo: o banco-falso instável, lento e fora do ar — rode com a extensão REST Client.
+# O banco-falso (localhost:9000) fica fora do Kong: aqui a gente o chama direto para mudar o
+# comportamento. Cada demo: muda o /config, faz compras e olha o resultado.
+#
+# Para acompanhar, num terminal:
+#   docker compose logs -f pagamentos banco-falso
+# Cada tentativa, a abertura e o fechamento do circuito e cada estorno aparecem com o id do pedido
+# e o correlationId.
+
+@baseUrl = http://localhost:8080
+@banco = http://localhost:9000
+
+### Configuração atual do banco -> 200 { latenciaMs, falhaPercent }
+GET {{banco}}/config
+
+### Login do cliente (seed) -> 200
+# @name loginCliente
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{ "email": "cliente@loja.com", "senha": "cliente123" }
+
+### Vitrine -> 200
+# @name vitrine
+GET {{baseUrl}}/produtos
+
+
+# =====================================================================
+# Demo 1: banco instável (30% de falha). O retry resolve.
+# =====================================================================
+
+### Banco falha 30% das cobranças com 503 -> 200
+POST {{banco}}/config
+Content-Type: application/json
+
+{ "falhaPercent": 30, "latenciaMs": 0 }
+
+### Compra: item -> 201
+POST {{baseUrl}}/carrinho/itens
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+Content-Type: application/json
+
+{ "produtoId": "{{vitrine.response.body.$[0].id}}", "quantidade": 1 }
+
+### Compra: checkout -> 202
+# @name instavel
+POST {{baseUrl}}/pedidos
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+Content-Type: application/json
+
+{ "enderecoEntrega": { "cep": "90010-000", "logradouro": "Rua A", "cidade": "Porto Alegre", "uf": "RS" },
+  "formaPagamento": "pix" }
+
+### Reenvie até sair de PENDENTE: quase sempre APROVADO, às vezes com tentativas 2 ou 3
+# (30% de falha por tentativa vira ~3% de falha com 3 tentativas). Repita a compra algumas vezes.
+GET {{baseUrl}}/pagamentos/{{instavel.response.body.$.id}}
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+
+
+# =====================================================================
+# Demo 2: banco fora (100% de falha). O circuito abre.
+# =====================================================================
+
+### Banco falha todas as cobranças -> 200
+POST {{banco}}/config
+Content-Type: application/json
+
+{ "falhaPercent": 100 }
+
+### Compra A: item -> 201
+POST {{baseUrl}}/carrinho/itens
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+Content-Type: application/json
+
+{ "produtoId": "{{vitrine.response.body.$[0].id}}", "quantidade": 1 }
+
+### Compra A: checkout -> 202 (3 tentativas, todas 503)
+# @name foraA
+POST {{baseUrl}}/pedidos
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+Content-Type: application/json
+
+{ "enderecoEntrega": { "cep": "90010-000", "logradouro": "Rua A", "cidade": "Porto Alegre", "uf": "RS" },
+  "formaPagamento": "pix" }
+
+### Compra B: item -> 201
+POST {{baseUrl}}/carrinho/itens
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+Content-Type: application/json
+
+{ "produtoId": "{{vitrine.response.body.$[0].id}}", "quantidade": 1 }
+
+### Compra B: checkout -> 202 (mais falhas: 50% ou mais das últimas chamadas, em pelo menos 5 -> CIRCUITO ABERTO no log)
+# A janela conta as últimas 10 chamadas, inclusive as da demo 1: o circuito pode abrir já na compra A.
+# @name foraB
+POST {{baseUrl}}/pedidos
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+Content-Type: application/json
+
+{ "enderecoEntrega": { "cep": "90010-000", "logradouro": "Rua A", "cidade": "Porto Alegre", "uf": "RS" },
+  "formaPagamento": "pix" }
+
+### Compra C: item -> 201
+POST {{baseUrl}}/carrinho/itens
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+Content-Type: application/json
+
+{ "produtoId": "{{vitrine.response.body.$[0].id}}", "quantidade": 1 }
+
+### Compra C: checkout -> 202 (circuito aberto: o banco nem é chamado, falha na hora)
+# @name foraC
+POST {{baseUrl}}/pedidos
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+Content-Type: application/json
+
+{ "enderecoEntrega": { "cep": "90010-000", "logradouro": "Rua A", "cidade": "Porto Alegre", "uf": "RS" },
+  "formaPagamento": "pix" }
+
+### /health -> circuitoBancoExterno: "aberto"
+GET {{baseUrl}}/health/pagamentos
+
+### Pagamento A -> ERRO, tentativas 3, motivo "banco indisponível (HTTP 503)"
+GET {{baseUrl}}/pagamentos/{{foraA.response.body.$.id}}
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+
+### Pagamento C -> ERRO, tentativas 0, motivo "banco indisponível (circuito aberto)"
+GET {{baseUrl}}/pagamentos/{{foraC.response.body.$.id}}
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+
+### Pedido C -> CANCELADO, "Pagamento recusado: banco indisponível (circuito aberto)." e o estoque devolvido
+GET {{baseUrl}}/pedidos/{{foraC.response.body.$.id}}
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+
+### Banco volta -> 200
+POST {{banco}}/config
+Content-Type: application/json
+
+{ "falhaPercent": 0 }
+
+### Espere 15 s: /health -> "meio-aberto" (a próxima cobrança testa se o banco voltou)
+GET {{baseUrl}}/health/pagamentos
+
+### Compra D: item -> 201
+POST {{baseUrl}}/carrinho/itens
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+Content-Type: application/json
+
+{ "produtoId": "{{vitrine.response.body.$[0].id}}", "quantidade": 1 }
+
+### Compra D: checkout -> 202 (a chamada de teste dá certo: CIRCUITO FECHADO no log)
+# @name voltou
+POST {{baseUrl}}/pedidos
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+Content-Type: application/json
+
+{ "enderecoEntrega": { "cep": "90010-000", "logradouro": "Rua A", "cidade": "Porto Alegre", "uf": "RS" },
+  "formaPagamento": "pix" }
+
+### /health -> "fechado", sozinho, sem ninguém religar o disjuntor
+GET {{baseUrl}}/health/pagamentos
+
+### Pagamento D -> APROVADO
+GET {{baseUrl}}/pagamentos/{{voltou.response.body.$.id}}
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+
+
+# =====================================================================
+# Demo 3: banco lento (3 s, acima do timeout de 2 s). Cobrou, não respondeu.
+# =====================================================================
+
+### Banco leva 3 s para responder -> 200
+POST {{banco}}/config
+Content-Type: application/json
+
+{ "latenciaMs": 3000, "falhaPercent": 0 }
+
+### Compra: item -> 201
+POST {{baseUrl}}/carrinho/itens
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+Content-Type: application/json
+
+{ "produtoId": "{{vitrine.response.body.$[0].id}}", "quantidade": 1 }
+
+### Compra: checkout -> 202 (cada tentativa estoura os 2 s; o banco COBROU na 1ª e devolve a mesma nas outras)
+# @name lento
+POST {{baseUrl}}/pedidos
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+Content-Type: application/json
+
+{ "enderecoEntrega": { "cep": "90010-000", "logradouro": "Rua A", "cidade": "Porto Alegre", "uf": "RS" },
+  "formaPagamento": "pix" }
+
+### Reenvie em ~10 s: ERRO, tentativas 3, "banco indisponível (sem resposta em 2000 ms (timeout))"
+# No log do banco-falso: a cobrança aprovada, as REPETIDAS e o ESTORNO (o estorno de segurança:
+# timeout quer dizer "não sei", então o pagamentos desfaz pela referência).
+GET {{baseUrl}}/pagamentos/{{lento.response.body.$.id}}
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+
+### Pedido -> CANCELADO, com o motivo do timeout
+GET {{baseUrl}}/pedidos/{{lento.response.body.$.id}}
+Authorization: Bearer {{loginCliente.response.body.$.token}}
+
+
+# =====================================================================
+# De volta ao normal
+# =====================================================================
+
+### Sem latência, sem falhas -> 200
+POST {{banco}}/config
+Content-Type: application/json
+
+{ "latenciaMs": 0, "falhaPercent": 0 }
+
+### ERRO: config inválida -> 400
+POST {{banco}}/config
+Content-Type: application/json
+
+{ "falhaPercent": 150 }
+
+### Direto no banco: cartão final 0002 -> 402 { motivo: "saldo insuficiente" }
+POST {{banco}}/cobrancas
+Content-Type: application/json
+
+{ "valor": 60, "cartaoFinal": "0002", "referencia": "teste-{{$randomInt 1000 999999}}" }
