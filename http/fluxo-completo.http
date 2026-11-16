@@ -1,0 +1,224 @@
+# A entrega final: a saga inteira, do login ao PAGO, e os casos de erro.
+# Rode com a extensão REST Client do VS Code, de cima para baixo, sem editar nada: o token e os ids
+# vêm das respostas anteriores (# @name). Pré-requisito: docker compose up -d --build.
+#
+#   1. Venda aprovada     login → vitrine → carrinho → checkout (202) → pedido até PAGO → pagamento
+#   2. Cartão recusado    final 0002 → CANCELADO, pagamento RECUSADO, estoque de volta
+#   3. Cancelamento       cancelar enquanto o banco cobra → pagamento ESTORNADO (ou CANCELADO)
+#   4. Acesso             cliente em rota de admin → 403
+#   5. Cache da vitrine   MISS, HIT e a invalidação quando o estoque muda
+#
+# Para acompanhar: Mailpit http://localhost:8025 · Kafka UI http://localhost:8090
+# Uma compra inteira nos logs: docker compose logs | grep <X-Request-Id da resposta do checkout>
+
+@baseUrl = http://localhost:8080
+@banco = http://localhost:9000
+
+### 0. Saúde do pagamentos: { status: ok, dependencias: { banco, kafka, circuitoBancoExterno } } -> 200
+GET {{baseUrl}}/health/pagamentos
+
+### 0. Banco do cartão no normal (sem latência, sem falhas) -> 200
+POST {{banco}}/config
+Content-Type: application/json
+
+{ "latenciaMs": 0, "falhaPercent": 0 }
+
+
+# =====================================================================
+# 1. Venda aprovada
+# =====================================================================
+
+### 1.1 Login do cliente do seed -> 200 { token, usuario }
+# @name login
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{ "email": "cliente@loja.com", "senha": "cliente123" }
+
+### 1.2 Vitrine (pública): guarda o id do primeiro produto. Anote o estoque { disponivel, reservado }
+# @name vitrine
+GET {{baseUrl}}/produtos
+
+### 1.3 Carrinho: 1 unidade do primeiro produto -> 201
+POST {{baseUrl}}/carrinho/itens
+Authorization: Bearer {{login.response.body.$.token}}
+Content-Type: application/json
+
+{ "produtoId": "{{vitrine.response.body.$[0].id}}", "quantidade": 1 }
+
+### 1.4 Checkout com cartão -> 202 Accepted, AGUARDANDO_ESTOQUE (o resto acontece por eventos)
+# @name pedido
+POST {{baseUrl}}/pedidos
+Authorization: Bearer {{login.response.body.$.token}}
+Content-Type: application/json
+
+{
+  "enderecoEntrega": { "cep": "90010-000", "logradouro": "Rua dos Andradas", "numero": "100",
+                       "cidade": "Porto Alegre", "uf": "RS" },
+  "formaPagamento": "cartao",
+  "numeroCartao": "4111111111111111"
+}
+
+### 1.5 Reenvie até PAGO (AGUARDANDO_ESTOQUE → AGUARDANDO_PAGAMENTO → PAGO)
+GET {{baseUrl}}/pedidos/{{pedido.response.body.$.id}}
+Authorization: Bearer {{login.response.body.$.token}}
+
+### 1.6 O pagamento do pedido -> 200, APROVADO, codigoTransacao TX-...
+GET {{baseUrl}}/pagamentos/{{pedido.response.body.$.id}}
+Authorization: Bearer {{login.response.body.$.token}}
+
+### 1.7 ERRO: cancelar um pedido PAGO -> 409
+POST {{baseUrl}}/pedidos/{{pedido.response.body.$.id}}/cancelar
+Authorization: Bearer {{login.response.body.$.token}}
+
+
+# =====================================================================
+# 2. Cartão recusado (final 0002): a saga compensa
+# =====================================================================
+
+### 2.1 Estoque antes da compra (anote o disponivel)
+GET {{baseUrl}}/produtos/{{vitrine.response.body.$[1].id}}
+
+### 2.2 Carrinho: 1 unidade do segundo produto -> 201
+POST {{baseUrl}}/carrinho/itens
+Authorization: Bearer {{login.response.body.$.token}}
+Content-Type: application/json
+
+{ "produtoId": "{{vitrine.response.body.$[1].id}}", "quantidade": 1 }
+
+### 2.3 Checkout com o cartão que o banco recusa -> 202
+# @name recusado
+POST {{baseUrl}}/pedidos
+Authorization: Bearer {{login.response.body.$.token}}
+Content-Type: application/json
+
+{
+  "enderecoEntrega": { "cep": "90010-000", "logradouro": "Rua A", "cidade": "Porto Alegre", "uf": "RS" },
+  "formaPagamento": "cartao",
+  "numeroCartao": "4000000000000002"
+}
+
+### 2.4 Reenvie até CANCELADO, com motivoCancelamento "Pagamento recusado: saldo insuficiente."
+GET {{baseUrl}}/pedidos/{{recusado.response.body.$.id}}
+Authorization: Bearer {{login.response.body.$.token}}
+
+### 2.5 O pagamento -> RECUSADO, motivo "saldo insuficiente"
+GET {{baseUrl}}/pagamentos/{{recusado.response.body.$.id}}
+Authorization: Bearer {{login.response.body.$.token}}
+
+### 2.6 O estoque voltou: o mesmo disponivel do 2.1 (pagamento.recusado → o catálogo devolve)
+GET {{baseUrl}}/produtos/{{vitrine.response.body.$[1].id}}
+
+
+# =====================================================================
+# 3. Cancelamento com estorno
+# =====================================================================
+
+### 3.1 Preparar: o banco leva 1,5 s para responder (ainda dentro do timeout de 2 s)
+POST {{banco}}/config
+Content-Type: application/json
+
+{ "latenciaMs": 1500 }
+
+### 3.2 Carrinho: 1 unidade do segundo produto -> 201
+POST {{baseUrl}}/carrinho/itens
+Authorization: Bearer {{login.response.body.$.token}}
+Content-Type: application/json
+
+{ "produtoId": "{{vitrine.response.body.$[1].id}}", "quantidade": 1 }
+
+### 3.3 Checkout com pix -> 202. Mande o 3.4 LOGO EM SEGUIDA (antes de 1,5 s)
+# @name cancelado
+POST {{baseUrl}}/pedidos
+Authorization: Bearer {{login.response.body.$.token}}
+Content-Type: application/json
+
+{
+  "enderecoEntrega": { "cep": "90010-000", "logradouro": "Rua A", "cidade": "Porto Alegre", "uf": "RS" },
+  "formaPagamento": "pix"
+}
+
+### 3.4 Cancelar enquanto o banco cobra -> 200, CANCELADO (publica pedido.cancelado)
+# Deu 409 (o pedido já estava PAGO)? Foi devagar: mande 3.2, 3.3 e 3.4 de novo, mais rápido.
+POST {{baseUrl}}/pedidos/{{cancelado.response.body.$.id}}/cancelar
+Authorization: Bearer {{login.response.body.$.token}}
+
+### 3.5 Reenvie até o final: ESTORNADO (cobrou e devolveu; e-mail "Seu pagamento foi estornado")
+# ou CANCELADO (o cancelamento chegou antes da cobrança e o banco nem foi chamado). No caminho, por
+# um instante, aparece PENDENTE (cobrando) e depois APROVADO (o banco respondeu; o estorno vem logo).
+GET {{baseUrl}}/pagamentos/{{cancelado.response.body.$.id}}
+Authorization: Bearer {{login.response.body.$.token}}
+
+### 3.6 O pedido continua CANCELADO: o pagamento.aprovado atrasado não o leva a PAGO
+GET {{baseUrl}}/pedidos/{{cancelado.response.body.$.id}}
+Authorization: Bearer {{login.response.body.$.token}}
+
+### 3.7 Banco de volta ao normal -> 200
+POST {{banco}}/config
+Content-Type: application/json
+
+{ "latenciaMs": 0, "falhaPercent": 0 }
+
+
+# =====================================================================
+# 4. Acesso
+# =====================================================================
+
+### 4.1 ERRO: cliente em rota de admin (listar usuários) -> 403 (o Kong barra pelo perfil)
+GET {{baseUrl}}/usuarios
+Authorization: Bearer {{login.response.body.$.token}}
+
+### 4.2 ERRO: cliente criando produto -> 403
+POST {{baseUrl}}/produtos
+Authorization: Bearer {{login.response.body.$.token}}
+Content-Type: application/json
+
+{ "sku": "X-1", "nome": "Proibido", "categoria": "livros", "preco": 10 }
+
+### 4.3 ERRO: cliente listando todos os pagamentos -> 403 (o pagamentos confere o perfil)
+GET {{baseUrl}}/pagamentos
+Authorization: Bearer {{login.response.body.$.token}}
+
+### 4.4 ERRO: pedido sem token -> 401
+GET {{baseUrl}}/pedidos/{{pedido.response.body.$.id}}
+
+
+# =====================================================================
+# 5. Cache da vitrine (Redis): olhe o cabeçalho X-Cache de cada resposta
+# =====================================================================
+
+### 5.1 Primeira leitura da categoria -> X-Cache: MISS (foi ao Mongo e guardou)
+GET {{baseUrl}}/produtos?categoria=roupas
+
+### 5.2 De novo -> X-Cache: HIT (veio do Redis, sem ir ao Mongo)
+GET {{baseUrl}}/produtos?categoria=roupas
+
+### 5.3 Uma compra muda o estoque e invalida a vitrine (INCR catalogo:versao)... -> 201
+POST {{baseUrl}}/carrinho/itens
+Authorization: Bearer {{login.response.body.$.token}}
+Content-Type: application/json
+
+{ "produtoId": "{{vitrine.response.body.$[0].id}}", "quantidade": 1 }
+
+### 5.4 ...checkout -> 202
+# @name pedidoCache
+POST {{baseUrl}}/pedidos
+Authorization: Bearer {{login.response.body.$.token}}
+Content-Type: application/json
+
+{
+  "enderecoEntrega": { "cep": "90010-000", "logradouro": "Rua A", "cidade": "Porto Alegre", "uf": "RS" },
+  "formaPagamento": "pix"
+}
+
+### 5.5 Reenvie até PAGO: a reserva do estoque (por evento) já aconteceu e invalidou a vitrine
+GET {{baseUrl}}/pedidos/{{pedidoCache.response.body.$.id}}
+Authorization: Bearer {{login.response.body.$.token}}
+
+### 5.6 A mesma leitura do 5.1 -> X-Cache: MISS de novo (a versão mudou: a lista velha não é mais lida)
+GET {{baseUrl}}/produtos?categoria=roupas
+
+### 5.7 Saúde do catálogo: dependencias { banco, kafka, cache: ok }
+# Com o Redis parado (docker compose stop redis): a vitrine continua com X-Cache: OFF e o /health
+# fica "degradado" (200). docker compose start redis para voltar.
+GET {{baseUrl}}/health/catalogo

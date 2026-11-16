@@ -40,7 +40,7 @@ public class DataSeeder implements ApplicationRunner {
 		if (!usuarioRepository.existsByEmail("admin@loja.com")) {
 			usuarioRepository.save(new Usuario("Administrador", "admin@loja.com",
 					passwordEncoder.encode("admin123"), Perfil.ADMIN));
-			log.info("Seed: admin@loja.com criado");
+			log.info("Seed: usuário admin criado");
 		}
 
 		if (!usuarioRepository.existsByEmail("cliente@loja.com")) {
@@ -48,7 +48,7 @@ public class DataSeeder implements ApplicationRunner {
 					passwordEncoder.encode("cliente123"), Perfil.CLIENTE));
 			enderecoRepository.save(new Endereco(cliente, "Casa", "01310-100", "Avenida Paulista", "1000",
 					"Apto 101", "São Paulo", "SP", true));
-			log.info("Seed: cliente@loja.com criado com um endereço");
+			log.info("Seed: usuário cliente criado com um endereço");
 		}
 	}
 

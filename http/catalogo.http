@@ -5,7 +5,7 @@
 
 @baseUrl = http://localhost:8080
 
-### Health: serviço e banco ok -> 200
+### Health: status ok; dependencias banco, kafka e cache (Redis) -> 200 (cache fora: "degradado", 200)
 GET {{baseUrl}}/health/catalogo
 
 ### Login do admin (seed) -> 200

@@ -3,6 +3,7 @@ package br.com.ecommerce.catalogo.controller;
 import java.util.List;
 
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
@@ -15,6 +16,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
+import br.com.ecommerce.catalogo.cache.VitrineCache;
 import br.com.ecommerce.catalogo.dto.EstoqueRequest;
 import br.com.ecommerce.catalogo.dto.ProdutoRequest;
 import br.com.ecommerce.catalogo.dto.ProdutoResponse;
@@ -31,21 +33,36 @@ import jakarta.validation.Valid;
 public class ProdutoController {
 
 	private final ProdutoService produtoService;
+	private final VitrineCache cache;
 
-	public ProdutoController(ProdutoService produtoService) {
+	public ProdutoController(ProdutoService produtoService, VitrineCache cache) {
 		this.produtoService = produtoService;
+		this.cache = cache;
 	}
 
-	// ?ids=a,b,c: o pedidos busca todos os produtos do carrinho numa chamada só
+	/**
+	 * A vitrine passa pelo cache (X-Cache: HIT, MISS ou OFF), uma chave por filtro.
+	 * ?ids=a,b,c é o checkout do pedidos, que busca o carrinho numa chamada só: essa NÃO passa pelo
+	 * cache. O preço da compra é sempre o do banco, nunca o de uma vitrine guardada.
+	 */
 	@GetMapping
-	public List<ProdutoResponse> listar(@RequestParam(required = false) String categoria,
+	public ResponseEntity<?> listar(@RequestParam(required = false) String categoria,
 			@RequestParam(required = false) String busca, @RequestParam(required = false) List<String> ids) {
-		return produtoService.listar(categoria, busca, ids);
+		if (ids != null && !ids.isEmpty()) {
+			return ResponseEntity.ok(produtoService.listar(categoria, busca, ids));
+		}
+		String recurso = "produtos?categoria=" + normalizar(categoria) + "&busca=" + normalizar(busca);
+		return cache.lerOuBuscar(recurso, () -> produtoService.listar(categoria, busca, null)).http();
 	}
 
 	@GetMapping("/{id}")
-	public ProdutoResponse buscar(@PathVariable String id) {
-		return produtoService.buscar(id);
+	public ResponseEntity<String> buscar(@PathVariable String id) {
+		return cache.lerOuBuscar("produto:" + id, () -> produtoService.buscar(id)).http();
+	}
+
+	// "Livros " e "livros" são a mesma busca: a mesma chave
+	private static String normalizar(String valor) {
+		return valor == null ? "" : valor.trim().toLowerCase();
 	}
 
 	@PostMapping

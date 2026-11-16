@@ -116,7 +116,7 @@ Content-Type: application/json
 { "enderecoEntrega": { "cep": "90010-000", "logradouro": "Rua A", "cidade": "Porto Alegre", "uf": "RS" },
   "formaPagamento": "pix" }
 
-### /health -> circuitoBancoExterno: "aberto"
+### /health -> status "degradado" (200: o pagamentos funciona, recusando rápido), dependencias.circuitoBancoExterno "aberto"
 GET {{baseUrl}}/health/pagamentos
 
 ### Pagamento A -> ERRO, tentativas 3, motivo "banco indisponível (HTTP 503)"
@@ -137,7 +137,7 @@ Content-Type: application/json
 
 { "falhaPercent": 0 }
 
-### Espere 15 s: /health -> "meio-aberto" (a próxima cobrança testa se o banco voltou)
+### Espere 15 s: /health -> dependencias.circuitoBancoExterno "meio-aberto" (a próxima cobrança testa se o banco voltou)
 GET {{baseUrl}}/health/pagamentos
 
 ### Compra D: item -> 201
@@ -156,7 +156,7 @@ Content-Type: application/json
 { "enderecoEntrega": { "cep": "90010-000", "logradouro": "Rua A", "cidade": "Porto Alegre", "uf": "RS" },
   "formaPagamento": "pix" }
 
-### /health -> "fechado", sozinho, sem ninguém religar o disjuntor
+### /health -> status "ok" e circuito "fechado", sozinho, sem ninguém religar o disjuntor
 GET {{baseUrl}}/health/pagamentos
 
 ### Pagamento D -> APROVADO

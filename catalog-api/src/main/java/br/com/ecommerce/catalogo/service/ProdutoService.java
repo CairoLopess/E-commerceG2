@@ -6,6 +6,7 @@ import java.util.Map;
 
 import org.springframework.stereotype.Service;
 
+import br.com.ecommerce.catalogo.cache.VitrineCache;
 import br.com.ecommerce.catalogo.document.Estoque;
 import br.com.ecommerce.catalogo.document.Produto;
 import br.com.ecommerce.catalogo.dto.EstoqueRequest;
@@ -23,10 +24,13 @@ public class ProdutoService {
 
 	private final ProdutoRepository produtoRepository;
 	private final CategoriaRepository categoriaRepository;
+	private final VitrineCache cache;
 
-	public ProdutoService(ProdutoRepository produtoRepository, CategoriaRepository categoriaRepository) {
+	public ProdutoService(ProdutoRepository produtoRepository, CategoriaRepository categoriaRepository,
+			VitrineCache cache) {
 		this.produtoRepository = produtoRepository;
 		this.categoriaRepository = categoriaRepository;
+		this.cache = cache;
 	}
 
 	// Vitrine pública: só produtos ativos. Id que não existe ou está desativado fica de fora.
@@ -53,7 +57,9 @@ public class ProdutoService {
 		if (request.ativo() != null) {
 			produto.setAtivo(request.ativo());
 		}
-		return ProdutoResponse.from(produtoRepository.save(produto));
+		ProdutoResponse criado = ProdutoResponse.from(produtoRepository.save(produto));
+		cache.invalidar("produto criado");
+		return criado;
 	}
 
 	// PUT substitui os dados do produto; o "reservado" do estoque nunca é mexido aqui
@@ -74,13 +80,17 @@ public class ProdutoService {
 		if (request.ativo() != null) {
 			produto.setAtivo(request.ativo());
 		}
-		return ProdutoResponse.from(produtoRepository.save(produto));
+		ProdutoResponse atualizado = ProdutoResponse.from(produtoRepository.save(produto));
+		cache.invalidar("produto alterado");
+		return atualizado;
 	}
 
 	public ProdutoResponse ajustarEstoque(String id, EstoqueRequest request) {
 		Produto produto = buscarEntidade(id);
 		produto.setEstoque(produto.getEstoque().comDisponivel(request.disponivel()));
-		return ProdutoResponse.from(produtoRepository.save(produto));
+		ProdutoResponse ajustado = ProdutoResponse.from(produtoRepository.save(produto));
+		cache.invalidar("estoque ajustado");
+		return ajustado;
 	}
 
 	// DELETE não apaga: só tira da vitrine (ativo = false)
@@ -88,6 +98,7 @@ public class ProdutoService {
 		Produto produto = buscarEntidade(id);
 		produto.setAtivo(false);
 		produtoRepository.save(produto);
+		cache.invalidar("produto desativado");
 	}
 
 	// Rotas de admin enxergam também os produtos desativados

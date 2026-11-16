@@ -4,19 +4,32 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import java.io.IOException;
+import java.net.ServerSocket;
+
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.mail.SimpleMailMessage;
 import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 
+import br.com.ecommerce.notificacoes.evento.KafkaSaude;
 import br.com.ecommerce.notificacoes.evento.NotificacoesListener;
 
 /**
@@ -24,12 +37,36 @@ import br.com.ecommerce.notificacoes.evento.NotificacoesListener;
  * e-mail que sairia para o Mailpit.
  */
 @SpringBootTest
+@AutoConfigureMockMvc
 @ActiveProfiles("test")
 @ExtendWith(OutputCaptureExtension.class)
 class NotificacoesTests {
 
 	@MockitoBean
 	JavaMailSender smtp;
+
+	@MockitoBean
+	KafkaSaude kafka;
+
+	@Autowired
+	MockMvc mvc;
+
+	// Um "SMTP" que só aceita conexão: o /health só testa se dá para conectar
+	static ServerSocket smtpFalso;
+
+	@DynamicPropertySource
+	static void smtp(DynamicPropertyRegistry registry) throws IOException {
+		if (smtpFalso == null) {
+			smtpFalso = new ServerSocket(0);
+		}
+		registry.add("spring.mail.host", () -> "127.0.0.1");
+		registry.add("spring.mail.port", () -> smtpFalso.getLocalPort());
+	}
+
+	@AfterAll
+	static void fecharSmtp() throws IOException {
+		smtpFalso.close();
+	}
 
 	@Autowired
 	NotificacoesListener listener;
@@ -52,7 +89,8 @@ class NotificacoesTests {
 			.contains("Total: R$ 2.239,70")
 			.contains("Pagamento: pix");
 		// O correlationId do evento vai para o log
-		assertThat(saida.getOut()).contains("[corr-teste]").contains("enviado para cliente@loja.com");
+		assertThat(saida.getOut()).contains("[corr-teste]").contains("enviado para c***@loja.com")
+			.doesNotContain("cliente@loja.com");
 	}
 
 	@Test
@@ -109,6 +147,30 @@ class NotificacoesTests {
 		listener.receber(mensagem("estoque.insuficiente", "{\"motivo\":\"x\"}"));
 
 		verify(smtp, never()).send(any(SimpleMailMessage.class));
+	}
+
+	// ---------- /health ----------
+
+	@Test
+	void healthComKafkaESmtpNoArDevolveOk() throws Exception {
+		when(kafka.noAr()).thenReturn(true);
+
+		mvc.perform(get("/health"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.servico").value("notificacoes"))
+			.andExpect(jsonPath("$.status").value("ok"))
+			.andExpect(jsonPath("$.dependencias.kafka").value("ok"))
+			.andExpect(jsonPath("$.dependencias.smtp").value("ok"));
+	}
+
+	@Test
+	void healthSemKafkaEstaForaDoAr() throws Exception {
+		when(kafka.noAr()).thenReturn(false);
+
+		mvc.perform(get("/health"))
+			.andExpect(status().isServiceUnavailable())
+			.andExpect(jsonPath("$.status").value("fora do ar"))
+			.andExpect(jsonPath("$.dependencias.kafka").value("fora"));
 	}
 
 	private SimpleMailMessage enviado() {

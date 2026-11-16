@@ -99,6 +99,14 @@ class BancoFalsoTests {
 	}
 
 	@Test
+	void healthDevolveOk() throws Exception {
+		mvc.perform(get("/health"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.servico").value("banco-falso"))
+			.andExpect(jsonPath("$.status").value("ok"));
+	}
+
+	@Test
 	void cobrancaSemReferenciaDevolve400() throws Exception {
 		mvc.perform(post("/cobrancas").contentType(MediaType.APPLICATION_JSON).content("{\"valor\":10}"))
 			.andExpect(status().isBadRequest());

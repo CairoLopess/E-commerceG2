@@ -49,6 +49,7 @@ import br.com.ecommerce.pedidos.catalogo.CatalogoClient;
 import br.com.ecommerce.pedidos.catalogo.CatalogoIndisponivelException;
 import br.com.ecommerce.pedidos.catalogo.ProdutoCatalogo;
 import br.com.ecommerce.pedidos.evento.EstoqueListener;
+import br.com.ecommerce.pedidos.evento.KafkaSaude;
 import br.com.ecommerce.pedidos.evento.PagamentosListener;
 import br.com.ecommerce.pedidos.security.UsuarioLogado;
 
@@ -80,6 +81,10 @@ class PedidosApiTests {
 	@Autowired
 	EstoqueListener estoqueListener;
 
+	// O /health pergunta ao Kafka; nos testes não há Kafka, então a resposta é simulada
+	@MockitoBean
+	KafkaSaude kafkaSaude;
+
 	@Autowired
 	PagamentosListener pagamentosListener;
 
@@ -91,6 +96,7 @@ class PedidosApiTests {
 	void catalogoEKafkaNoAr() {
 		catalogoTem(livro(new BigDecimal("119.90")), celular());
 		when(kafka.send(anyString(), anyString(), anyString())).thenReturn(CompletableFuture.completedFuture(null));
+		when(kafkaSaude.noAr()).thenReturn(true);
 	}
 
 	// ---------- identidade ----------
@@ -516,21 +522,35 @@ class PedidosApiTests {
 	@Test
 	@ExtendWith(OutputCaptureExtension.class)
 	void logDeCadaRequisicaoSaiComOXRequestId(CapturedOutput saida) throws Exception {
-		mvc.perform(get("/health").header("X-Request-Id", "3c37be51-teste")).andExpect(status().isOk());
+		mvc.perform(get("/carrinho").header("X-Request-Id", "3c37be51-teste"));
 		// Id forjado (com quebra de linha, para inventar uma linha no log) não entra
-		mvc.perform(get("/health").header("X-Request-Id", "falso\nlinha forjada")).andExpect(status().isOk());
+		mvc.perform(get("/carrinho").header("X-Request-Id", "falso\nlinha forjada"));
+		// O /health não vai para o log: o Docker o chama a cada 10 s
+		mvc.perform(get("/health").header("X-Request-Id", "health-teste"));
 
-		assertThat(saida.getOut().lines().filter(linha -> linha.contains("GET /health -> 200")))
+		assertThat(saida.getOut().lines().filter(linha -> linha.contains("GET /carrinho -> 401")))
 			.anyMatch(linha -> linha.contains("[3c37be51-teste]"));
-		assertThat(saida.getOut()).doesNotContain("linha forjada");
+		assertThat(saida.getOut()).doesNotContain("linha forjada").doesNotContain("GET /health");
 	}
 
 	@Test
-	void healthDevolveOk() throws Exception {
+	void healthComBancoEKafkaNoArDevolveOk() throws Exception {
 		mvc.perform(get("/health"))
 			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.servico").value("pedidos"))
 			.andExpect(jsonPath("$.status").value("ok"))
-			.andExpect(jsonPath("$.banco").value("ok"));
+			.andExpect(jsonPath("$.dependencias.banco").value("ok"))
+			.andExpect(jsonPath("$.dependencias.kafka").value("ok"));
+	}
+
+	@Test
+	void healthSemKafkaEstaForaDoAr() throws Exception {
+		when(kafkaSaude.noAr()).thenReturn(false);
+
+		mvc.perform(get("/health"))
+			.andExpect(status().isServiceUnavailable())
+			.andExpect(jsonPath("$.status").value("fora do ar"))
+			.andExpect(jsonPath("$.dependencias.kafka").value("fora"));
 	}
 
 	// ---------- apoio ----------

@@ -5,6 +5,7 @@ import java.util.List;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 
+import br.com.ecommerce.catalogo.cache.VitrineCache;
 import br.com.ecommerce.catalogo.document.Categoria;
 import br.com.ecommerce.catalogo.dto.CategoriaRequest;
 import br.com.ecommerce.catalogo.dto.CategoriaResponse;
@@ -15,9 +16,11 @@ import br.com.ecommerce.catalogo.repository.CategoriaRepository;
 public class CategoriaService {
 
 	private final CategoriaRepository categoriaRepository;
+	private final VitrineCache cache;
 
-	public CategoriaService(CategoriaRepository categoriaRepository) {
+	public CategoriaService(CategoriaRepository categoriaRepository, VitrineCache cache) {
 		this.categoriaRepository = categoriaRepository;
+		this.cache = cache;
 	}
 
 	public List<CategoriaResponse> listar() {
@@ -30,7 +33,10 @@ public class CategoriaService {
 		if (categoriaRepository.existsBySlug(request.slug())) {
 			throw ApiException.conflito("Já existe uma categoria com este slug.");
 		}
-		return CategoriaResponse.from(categoriaRepository.save(new Categoria(request.nome(), request.slug())));
+		CategoriaResponse criada = CategoriaResponse.from(categoriaRepository.save(new Categoria(request.nome(),
+				request.slug())));
+		cache.invalidar("categoria criada");
+		return criada;
 	}
 
 }

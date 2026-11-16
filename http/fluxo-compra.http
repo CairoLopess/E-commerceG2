@@ -18,7 +18,7 @@
 @baseUrl = http://localhost:8080
 @banco = http://localhost:9000
 
-### Health do pagamentos: banco ok e circuito fechado -> 200
+### Health do pagamentos: status ok; dependencias banco, kafka ok e circuitoBancoExterno fechado -> 200
 GET {{baseUrl}}/health/pagamentos
 
 ### Banco-falso no normal (sem latência, sem falhas) -> 200

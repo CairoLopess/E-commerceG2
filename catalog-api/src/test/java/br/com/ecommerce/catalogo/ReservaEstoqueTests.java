@@ -32,6 +32,7 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 
 import com.jayway.jsonpath.JsonPath;
 
+import br.com.ecommerce.catalogo.cache.VitrineCache;
 import br.com.ecommerce.catalogo.document.Estoque;
 import br.com.ecommerce.catalogo.document.Produto;
 import br.com.ecommerce.catalogo.evento.PagamentosListener;
@@ -86,9 +87,13 @@ class ReservaEstoqueTests {
 	@Autowired
 	ReservaRepository reservas;
 
+	@Autowired
+	MemoriaCacheStore cacheStore;
+
 	@BeforeEach
 	void kafkaNoAr() {
 		when(kafka.send(anyString(), anyString(), anyString())).thenReturn(CompletableFuture.completedFuture(null));
+		cacheStore.desligar();
 	}
 
 	@Test
@@ -114,6 +119,23 @@ class ReservaEstoqueTests {
 		assertThat(evento).contains("\"valorTotal\":2239.70");
 		assertThat(JsonPath.<String>read(evento, "$.dados.clienteEmail")).isEqualTo("cliente@loja.com");
 		assertThat(JsonPath.<String>read(evento, "$.dados.formaPagamento")).isEqualTo("pix");
+	}
+
+	@Test
+	void reservarConfirmarEDevolverInvalidamACacheDaVitrine() {
+		cacheStore.ligar();
+		String livro = produto("Effective Java", 10);
+		String pedidoId = UUID.randomUUID().toString();
+
+		pedidoCriado(pedidoId, item(livro, 2));
+		assertThat(versaoDaVitrine()).isEqualTo(1);
+		pagamento("pagamento.aprovado", pedidoId);
+		assertThat(versaoDaVitrine()).isEqualTo(2);
+		listener.receber(mensagem("pedido.cancelado", pedidoId, "{}"));
+		assertThat(versaoDaVitrine()).isEqualTo(3);
+		// Repetido: nada mudou no estoque, nada a invalidar
+		listener.receber(mensagem("pedido.cancelado", pedidoId, "{}"));
+		assertThat(versaoDaVitrine()).isEqualTo(3);
 	}
 
 	@Test
@@ -284,6 +306,11 @@ class ReservaEstoqueTests {
 
 	private void pagamento(String tipo, String pedidoId) {
 		pagamentosListener.receber(mensagem(tipo, pedidoId, "{\"clienteEmail\":\"cliente@loja.com\"}"));
+	}
+
+	private long versaoDaVitrine() {
+		String versao = cacheStore.get(VitrineCache.VERSAO);
+		return versao == null ? 0 : Long.parseLong(versao);
 	}
 
 	private String statusDaReserva(String pedidoId) {

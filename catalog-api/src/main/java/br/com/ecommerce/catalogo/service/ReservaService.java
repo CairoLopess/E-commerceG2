@@ -9,6 +9,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 
+import br.com.ecommerce.catalogo.cache.VitrineCache;
 import br.com.ecommerce.catalogo.document.Produto;
 import br.com.ecommerce.catalogo.document.Reserva;
 import br.com.ecommerce.catalogo.evento.EstoqueEventos;
@@ -37,11 +38,14 @@ public class ReservaService {
 	private final ReservaRepository reservas;
 	private final ProdutoRepository produtos;
 	private final Eventos eventos;
+	private final VitrineCache cache;
 
-	public ReservaService(ReservaRepository reservas, ProdutoRepository produtos, Eventos eventos) {
+	public ReservaService(ReservaRepository reservas, ProdutoRepository produtos, Eventos eventos,
+			VitrineCache cache) {
 		this.reservas = reservas;
 		this.produtos = produtos;
 		this.eventos = eventos;
+		this.cache = cache;
 	}
 
 	public void reservar(String pedidoId, PedidoCriado pedido) {
@@ -76,6 +80,8 @@ public class ReservaService {
 		// 3. deu tudo certo
 		reserva.reservado();
 		reservas.save(reserva);
+		// A vitrine mostra o estoque: o que acabou de sair do disponível não pode continuar aparecendo
+		cache.invalidar("estoque reservado");
 		log.info("Pedido {}: estoque reservado ({} itens)", pedidoId, itens.size());
 		publicarResultado(pedidoId, pedido, reserva);
 	}
@@ -116,6 +122,7 @@ public class ReservaService {
 			.ifPresentOrElse(reserva -> {
 				reserva.getItens().forEach(item -> produtos.confirmarVenda(item.produtoId(), item.quantidade()));
 				log.info("Pedido {}: venda confirmada, {} itens saíram do reservado", pedidoId, reserva.getItens().size());
+				cache.invalidar("venda confirmada");
 			}, () -> log.info("Pedido {}: nada a confirmar (sem reserva RESERVADO)", pedidoId));
 	}
 
@@ -140,6 +147,7 @@ public class ReservaService {
 				}
 				log.info("Pedido {}: COMPENSAÇÃO ({}), estoque devolvido ({} itens, estava {})", pedidoId, porque,
 						reserva.getItens().size(), reserva.getStatus());
+				cache.invalidar("estoque devolvido");
 			}, () -> log.info("Pedido {}: nada a devolver ({}): sem reserva ativa", pedidoId, porque));
 	}
 

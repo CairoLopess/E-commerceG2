@@ -1,12 +1,27 @@
-# Sobe o gateway, os serviços, os bancos e o Kafka: docker compose up --build
+# Sobe tudo do zero, sem nenhum passo a mais: docker compose up -d --build
+# Gateway, 5 serviços, 4 bancos, Redis, Kafka, Kafka UI, Mailpit e o banco-falso. Tabelas, seeds e
+# tópicos são criados sozinhos na subida. Nenhum .env é necessário: toda variável tem valor padrão.
 # Só o gateway publica porta para a API (8080). Dentro da rede, todo serviço HTTP escuta na 3000.
 # Ferramentas, só nesta máquina: Kafka UI (8090) e a caixa de entrada do Mailpit (8025).
 # Fora do Kong: o banco-falso (9000), que faz o papel do banco do cartão (um sistema que não é nosso).
-# Antes, copie .env.example para .env (o JWT_SECRET é obrigatório).
 
 # Memória: tudo junto (6 JVMs, Kafka, Mongo, 3 Postgres) precisa caber num WSL de 2 GB.
 # Sem limite, cada JVM reserva até 1/4 da RAM e o Kafka pede 1 GB de heap: a VM trava trocando com o swap.
 # Heap pequeno, GC serial e JIT só de nível 1 bastam para uma loja de aula. Precisa de mais? Troque no .env.
+# Segredo do JWT: o mesmo no usuarios (assina) e no Kong (confere). O padrão existe para o sistema
+# subir num clone novo sem .env; fora da aula, defina JWT_SECRET (pelo menos 32 caracteres).
+x-jwt-secret: &jwt-secret ${JWT_SECRET:-segredo-de-desenvolvimento-troque-fora-da-aula-0123456789}
+
+# O Docker chama o /health de dentro do container a cada 10 s: 2xx = healthy; 3 falhas seguidas
+# (o 503 de "fora do ar" conta como falha) = unhealthy. start_period: folga para subir (esperar o
+# Kafka, rodar o seed) sem ser marcado como doente.
+x-healthcheck-servico: &healthcheck-servico
+  test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:3000/health"]
+  interval: 10s
+  timeout: 5s
+  retries: 3
+  start_period: 120s
+
 x-jvm-servico: &jvm-servico ${JAVA_OPTS_SERVICOS:--Xms32m -Xmx128m -Xss512k -XX:MaxMetaspaceSize=160m -XX:ReservedCodeCacheSize=40m -XX:+UseSerialGC -XX:TieredStopAtLevel=1}
 
 services:
@@ -35,11 +50,12 @@ services:
       DB_URL: jdbc:postgresql://usuarios-db:5432/usuarios
       DB_USER: ${DB_USER:-postgres}
       DB_PASSWORD: ${DB_PASSWORD:-postgres}
-      JWT_SECRET: ${JWT_SECRET:?defina JWT_SECRET no .env (copie de .env.example)}
+      JWT_SECRET: *jwt-secret
       JWT_EXPIRACAO: ${JWT_EXPIRACAO:-2h}
     depends_on:
       usuarios-db:
         condition: service_healthy
+    healthcheck: *healthcheck-servico
 
   # ---------- catalogo: Mongo ----------
   catalogo-db:
@@ -62,13 +78,18 @@ services:
     environment:
       JAVA_TOOL_OPTIONS: *jvm-servico
       PORT: 3000
-      MONGODB_URI: mongodb://catalogo-db:27017/catalogo
+      MONGODB_URI: mongodb://catalogo-db:27017/catalogo?serverSelectionTimeoutMS=2000
       KAFKA_BROKERS: kafka:9092
+      REDIS_HOST: redis
     depends_on:
       catalogo-db:
         condition: service_healthy
       kafka:
         condition: service_healthy
+      # Só "iniciado": o cache acelera, não sustenta. Sem ele, a vitrine responde (X-Cache: OFF).
+      redis:
+        condition: service_started
+    healthcheck: *healthcheck-servico
     # Ao parar, o consumer sai do grupo na hora e as partições passam para outra réplica
     stop_grace_period: 10s
 
@@ -105,14 +126,17 @@ services:
         condition: service_healthy
       kafka:
         condition: service_healthy
+    healthcheck: *healthcheck-servico
     stop_grace_period: 10s
 
   # ---------- notificacoes: só escuta ----------
-  # Sem banco, sem porta, sem rota no Kong: ninguém chama, ninguém conhece.
+  # Sem banco, sem porta publicada, sem rota no Kong: ninguém de fora chama. O HTTP interno existe
+  # só para o healthcheck do Docker (/health com o Kafka e o SMTP).
   notificacoes:
     build: ./notification-api
     environment:
       JAVA_TOOL_OPTIONS: *jvm-servico
+      PORT: 3000
       KAFKA_BROKERS: kafka:9092
       SMTP_HOST: mailpit
       SMTP_PORT: 1025
@@ -120,7 +144,8 @@ services:
       kafka:
         condition: service_healthy
       mailpit:
-        condition: service_started
+        condition: service_healthy
+    healthcheck: *healthcheck-servico
     stop_grace_period: 10s
 
   # ---------- pagamentos: Postgres próprio ----------
@@ -156,6 +181,7 @@ services:
         condition: service_healthy
       kafka:
         condition: service_healthy
+    healthcheck: *healthcheck-servico
     stop_grace_period: 10s
 
   # ---------- banco-falso: o sistema externo ----------
@@ -168,6 +194,21 @@ services:
     environment:
       JAVA_TOOL_OPTIONS: *jvm-servico
       PORT: 3000
+    healthcheck: *healthcheck-servico
+
+  # ---------- cache da vitrine: Redis ----------
+  # Sem persistência (--save "" e sem AOF): reiniciado, volta vazio, nunca com dado velho de antes.
+  # 64 MB, descartando só chaves com TTL: o catalogo:versao (sem TTL) nunca é descartado.
+  # Não publica porta. Para olhar por dentro: docker compose exec redis redis-cli
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "64mb",
+              "--maxmemory-policy", "volatile-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
 
   # ---------- mensageria: Kafka (KRaft) ----------
   # Um container faz tudo: broker e controller (KRaft, sem ZooKeeper). Um broker só, fator 1:
@@ -212,6 +253,12 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8080/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
 
   # SMTP de mentira: recebe tudo e mostra em http://localhost:8025. Nada sai para a internet.
   mailpit:
@@ -229,7 +276,17 @@ services:
       - "127.0.0.1:8002:8002"      # Kong Manager, só nesta máquina
     volumes:
       - ./kong:/kong:ro
-    # Copia o kong.yml trocando __JWT_SECRET__ pelo segredo do .env e sobe o Kong.
+    # Só abre a porta quando os serviços da API estão de pé: depois do "up -d", o .http já vende.
+    depends_on:
+      usuarios:
+        condition: service_healthy
+      catalogo:
+        condition: service_healthy
+      pedidos:
+        condition: service_healthy
+      pagamentos:
+        condition: service_healthy
+    # Copia o kong.yml trocando __JWT_SECRET__ pelo segredo (o mesmo do usuarios) e sobe o Kong.
     # $$ escapa o $ para o compose: quem expande a variável é o sh, dentro do container.
     entrypoint:
       - sh
@@ -237,7 +294,7 @@ services:
       - 'sed "s|__JWT_SECRET__|$${JWT_SECRET}|g" /kong/kong.yml > /tmp/kong.yml && exec /docker-entrypoint.sh kong docker-start'
     environment:
       # O mesmo segredo que o usuarios usa para assinar os tokens
-      JWT_SECRET: ${JWT_SECRET:?defina JWT_SECRET no .env (copie de .env.example)}
+      JWT_SECRET: *jwt-secret
       KONG_DATABASE: "off"
       KONG_DECLARATIVE_CONFIG: /tmp/kong.yml
       KONG_PROXY_LISTEN: 0.0.0.0:8000

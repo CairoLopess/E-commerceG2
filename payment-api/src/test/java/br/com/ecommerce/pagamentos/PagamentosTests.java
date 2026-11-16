@@ -42,6 +42,7 @@ import com.jayway.jsonpath.JsonPath;
 import br.com.ecommerce.pagamentos.banco.BancoClient;
 import br.com.ecommerce.pagamentos.banco.BancoIndisponivelException;
 import br.com.ecommerce.pagamentos.banco.BancoRecusouException;
+import br.com.ecommerce.pagamentos.evento.KafkaSaude;
 import br.com.ecommerce.pagamentos.evento.PagamentosListener;
 import br.com.ecommerce.pagamentos.security.UsuarioLogado;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
@@ -70,12 +71,16 @@ class PagamentosTests {
 	@Autowired
 	CircuitBreaker circuito;
 
+	@MockitoBean
+	KafkaSaude kafkaSaude;
+
 	final UUID cliente = UUID.randomUUID();
 
 	@BeforeEach
 	void kafkaNoArECircuitoFechado() {
 		when(kafka.send(anyString(), anyString(), anyString())).thenReturn(CompletableFuture.completedFuture(null));
 		circuito.reset();
+		when(kafkaSaude.noAr()).thenReturn(true);
 	}
 
 	// ---------- cobrança ----------
@@ -200,14 +205,16 @@ class PagamentosTests {
 			.andExpect(jsonPath("$.status").value("ERRO"))
 			.andExpect(jsonPath("$.tentativas").value(0))
 			.andExpect(jsonPath("$.motivo").value("banco indisponível (circuito aberto)"));
-		mvc.perform(get("/health")).andExpect(jsonPath("$.circuitoBancoExterno").value("aberto"));
+		mvc.perform(get("/health")).andExpect(status().isOk()).andExpect(jsonPath("$.status").value("degradado"))
+			.andExpect(jsonPath("$.dependencias.circuitoBancoExterno").value("aberto"));
 
 		// Passado o tempo de espera, o meio-aberto deixa uma chamada testar; deu certo, fecha
 		circuito.transitionToHalfOpenState();
-		mvc.perform(get("/health")).andExpect(jsonPath("$.circuitoBancoExterno").value("meio-aberto"));
+		mvc.perform(get("/health")).andExpect(jsonPath("$.dependencias.circuitoBancoExterno").value("meio-aberto"));
 		doReturn("TX-VOLTOU").when(banco).cobrar(any(), any(), any(), any());
 		estoqueReservado(UUID.randomUUID().toString(), "pix", null);
-		mvc.perform(get("/health")).andExpect(jsonPath("$.circuitoBancoExterno").value("fechado"));
+		mvc.perform(get("/health")).andExpect(jsonPath("$.status").value("ok"))
+			.andExpect(jsonPath("$.dependencias.circuitoBancoExterno").value("fechado"));
 	}
 
 	// ---------- cancelamento ----------
@@ -307,8 +314,21 @@ class PagamentosTests {
 	void healthMostraOBancoEOCircuito() throws Exception {
 		mvc.perform(get("/health"))
 			.andExpect(status().isOk())
-			.andExpect(jsonPath("$.banco").value("ok"))
-			.andExpect(jsonPath("$.circuitoBancoExterno").value("fechado"));
+			.andExpect(jsonPath("$.servico").value("pagamentos"))
+			.andExpect(jsonPath("$.status").value("ok"))
+			.andExpect(jsonPath("$.dependencias.banco").value("ok"))
+			.andExpect(jsonPath("$.dependencias.kafka").value("ok"))
+			.andExpect(jsonPath("$.dependencias.circuitoBancoExterno").value("fechado"));
+	}
+
+	@Test
+	void healthSemKafkaEstaForaDoAr() throws Exception {
+		when(kafkaSaude.noAr()).thenReturn(false);
+
+		mvc.perform(get("/health"))
+			.andExpect(status().isServiceUnavailable())
+			.andExpect(jsonPath("$.status").value("fora do ar"))
+			.andExpect(jsonPath("$.dependencias.kafka").value("fora"));
 	}
 
 	// ---------- apoio ----------

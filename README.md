@@ -1,98 +1,66 @@
 # E-commerce G2 — microserviços
 
-Projeto da disciplina de Arquitetura de Sistemas: um e-commerce em microserviços, construído
-uma peça por aula. Parte 1: usuários e catálogo. Parte 2: API Gateway (Kong) e pedidos. Parte 3:
-Kafka e eventos. **Parte 4 (esta entrega): saga e resiliência**: o pagamento entra na compra. O
-pagamentos cobra num banco de cartão de mentira (o banco-falso, que demora e falha quando a gente
-manda), com timeout, retry e circuit breaker. Quando algo dá errado, cada serviço desfaz a própria
-parte: o catálogo devolve o estoque, o pedido vira `CANCELADO` com o motivo, o pagamento é estornado
-e o cliente recebe e-mail. Cada serviço tem o seu banco, e tudo sobe junto com um comando.
+**Autor:** Cairo (trabalho individual)
 
-| Serviço | Pasta | Porta | Banco | Responsabilidade |
-|---|---|---|---|---|
-| gateway | [`kong/`](kong) | **8080** (a única da API) | — | Kong: rotas, JWT, perfis, rate limit |
-| usuarios | [`usersApi/`](usersApi) | 3000 (interna) | Postgres | cadastro, login (JWT) e endereços |
-| catalogo | [`catalog-api/`](catalog-api) | 3000 (interna) | Mongo | produtos, categorias, estoque e reserva |
-| pedidos | [`order-api/`](order-api) | 3000 (interna) | Postgres | carrinho, checkout, status e cancelamento do pedido |
-| pagamentos | [`payment-api/`](payment-api) | 3000 (interna) | Postgres | cobra no banco (timeout, retry, circuit breaker) e estorna |
-| notificacoes | [`notification-api/`](notification-api) | nenhuma | — | só escuta eventos e manda e-mail |
-| banco-falso | [`fake-bank/`](fake-bank) | **9000** (fora do Kong) | — (memória) | o banco do cartão, sistema externo: recusa, demora e falha sob comando |
-| kafka | — | 9092 (interna) | — | Kafka 3.8 (KRaft, um broker): tópicos `pedidos`, `estoque` e `pagamentos` |
-| kafka-ui | — | 8090 (só nesta máquina) | — | ver tópicos, mensagens, grupos e lag |
-| mailpit | — | 8025 (só nesta máquina) | — | SMTP de mentira com caixa de entrada |
-
-Dentro da rede do Docker, todo serviço escuta na 3000 e é chamado pelo nome (`http://catalogo:3000`).
-De fora, só o gateway responde (e o banco-falso, na 9000, que faz o papel de um sistema que não é
-nosso). Rodando sem Docker, cada serviço usa a sua porta padrão (3001, 3002, 3003, 3004 e o
-banco-falso na 9000) para todos subirem juntos na mesma máquina.
-
-Stack: Java 21, Spring Boot 4.1, Spring Data JPA / Spring Data MongoDB / JDBC, Spring for Apache
-Kafka, Resilience4j (circuit breaker), Kafka 3.8 (KRaft), Kong 3.9 (sem banco), Mailpit, Docker
-Compose.
+Projeto da disciplina de Arquitetura de Sistemas: um e-commerce em microserviços, construído uma
+peça por aula (usuários e catálogo, gateway e pedidos, Kafka e eventos, saga e resiliência,
+observabilidade e cache). O cliente compra pelo gateway; o pedido anda sozinho por eventos: o
+catálogo reserva o estoque, o pagamentos cobra num banco de cartão de mentira (com timeout, retry e
+circuit breaker) e, se algo der errado, cada serviço desfaz a própria parte. Cada serviço tem o seu
+banco, cada um diz como está de saúde, a vitrine tem cache, e tudo sobe com um comando.
 
 ---
 
-## Como subir
+## Subir
 
-Pré-requisito: Docker com o Compose.
+Pré-requisito: Docker com o Compose. Num clone novo, sem nenhum passo a mais (nem `.env`):
 
 ```bash
-cp .env.example .env      # e troque o JWT_SECRET (mínimo 32 caracteres)
-docker compose up --build
+docker compose up -d --build
 ```
 
-Pronto quando estes quatro respondem `200` (pelo gateway):
+A primeira vez compila 6 imagens Java e leva alguns minutos. As tabelas, os seeds e os tópicos do
+Kafka são criados sozinhos na subida, e subir de novo não duplica nada. O gateway só abre a porta
+quando os serviços da API estão de pé: quando o comando termina, a loja já vende.
 
-- http://localhost:8080/health/usuarios
-- http://localhost:8080/health/catalogo
-- http://localhost:8080/health/pedidos
-- http://localhost:8080/health/pagamentos (com `"circuitoBancoExterno": "fechado"`)
-
-E o banco-falso, direto: http://localhost:9000/config (`{ "latenciaMs": 0, "falhaPercent": 0 }`).
-
-Os serviços esperam o Kafka ficar healthy antes de subir (a primeira subida leva uns 30 s a mais).
-Para acompanhar os eventos:
-
-- **Kafka UI**: http://localhost:8090 (tópicos `pedidos`, `estoque` e `pagamentos`; grupos
-  `pedidos`, `catalogo`, `pagamentos` e `notificacoes`, e o lag de cada um)
-- **Mailpit**: http://localhost:8025 (os e-mails que o notificacoes mandou)
-
-Para conferir a configuração do Kong: `curl localhost:8001/routes` ou o Kong Manager em
-http://localhost:8002. Mudou o [`kong/kong.yml`](kong/kong.yml)? `docker compose restart gateway`.
-
-Para zerar os bancos (apaga os dados e roda o seed de novo): `docker compose down -v`.
-
-### Rastreando uma requisição
-
-O gateway dá um `X-Request-Id` a cada requisição, repassa a todos os serviços e devolve na
-resposta. Cada serviço escreve uma linha por requisição com o id entre colchetes, e toda linha de
-log escrita durante ela também leva o id (ex.: o aviso de catálogo fora, no pedidos):
-
-```
-INFO --- [pedidos] [nio-3000-exec-1] [3c37be51-...] b.c.e.pedidos.config.RequestIdFilter : POST /pedidos -> 202 (48 ms)
-INFO --- [catalogo] [nio-3000-exec-3] [3c37be51-...] b.c.e.catalogo.config.RequestIdFilter : GET /produtos -> 200 (9 ms)
+```bash
+docker compose ps        # todos "Up ... (healthy)"
 ```
 
-O id também vai dentro de cada evento (`correlationId`) e segue de evento em evento: quem trata o
-evento escreve o log com ele, e os eventos que publica em seguida levam o mesmo id. Uma compra
-inteira, do checkout ao e-mail:
+Depois, abra [`http/fluxo-completo.http`](http/fluxo-completo.http) no VS Code (extensão REST
+Client) e rode de cima para baixo: login, carrinho, checkout e o pedido chega a `PAGO`.
 
-```
-[pedidos]      [3c37be51-...] Publicado pedido.criado do pedido 6f1c... no tópico pedidos
-[catalogo]     [3c37be51-...] Pedido 6f1c...: estoque reservado (2 itens)
-[catalogo]     [3c37be51-...] Publicado estoque.reservado do pedido 6f1c... no tópico estoque
-[notificacoes] [3c37be51-...] E-mail "Recebemos o seu pedido" enviado para cliente@loja.com
-[pedidos]      [3c37be51-...] Pedido 6f1c... agora está AGUARDANDO_PAGAMENTO
-[pagamentos]   [3c37be51-...] Pedido 6f1c...: tentativa 1/3 falhou: HTTP 503
-[pagamentos]   [3c37be51-...] Pedido 6f1c...: tentativa 2/3 aprovada (TX-F6A1B2C3)
-[pagamentos]   [3c37be51-...] Publicado pagamento.aprovado do pedido 6f1c... no tópico pagamentos
-[catalogo]     [3c37be51-...] Pedido 6f1c...: venda confirmada, 2 itens saíram do reservado
-[pedidos]      [3c37be51-...] Pedido 6f1c... agora está PAGO
-[notificacoes] [3c37be51-...] E-mail "Pagamento aprovado: pedido confirmado" enviado para cliente@loja.com
+| O quê | Onde | Observação |
+|---|---|---|
+| API da loja (Kong) | http://localhost:8080 | a única porta da API |
+| Saúde de cada serviço | http://localhost:8080/health/usuarios (e `/catalogo`, `/pedidos`, `/pagamentos`) | público, sem token |
+| banco-falso (banco do cartão) | http://localhost:9000/config | fora do Kong: é um sistema "externo" |
+| Kafka UI | http://localhost:8090 | tópicos, mensagens, grupos e lag (só nesta máquina) |
+| Mailpit | http://localhost:8025 | os e-mails que a loja mandou (só nesta máquina) |
+| Kong Admin / Manager | http://localhost:8001 · http://localhost:8002 | só leitura, só nesta máquina |
+
+Serviços, bancos, Redis e Kafka não publicam porta: só o gateway os alcança. Para zerar tudo
+(apaga os dados; o seed roda de novo): `docker compose down -v`. Mudou o
+[`kong/kong.yml`](kong/kong.yml)? `docker compose restart gateway`.
+
+Memória: são 6 JVMs, Kafka, Mongo, Redis e 3 Postgres. O compose limita o heap de cada um para
+caber num WSL de 2 GB, mas aí tudo fica lento (trocando com o swap); 4 GB para o Docker é o
+confortável. Os limites podem ser trocados por variável (`JAVA_OPTS_SERVICOS`, `KAFKA_HEAP_OPTS`).
+
+Docker direto no WSL (sem o Docker Desktop)? O WSL desliga a distribuição segundos depois do último
+comando `wsl`, e os containers caem juntos ("Exited (255)" sem motivo aparente). No
+`%USERPROFILE%\.wslconfig`:
+
+```ini
+[wsl2]
+memory=3GB
+swap=4GB
+
+[general]
+instanceIdleTimeout=-1
 ```
 
-Com o id da resposta (ou de um chamado de suporte), um grep acha a história inteira:
-`docker compose logs | grep 3c37be51`.
+e `wsl --shutdown` para valer.
 
 ### Usuários do seed
 
@@ -104,63 +72,73 @@ Com o id da resposta (ou de um chamado de suporte), um grep acha a história int
 O catálogo nasce com 3 categorias (`celulares`, `roupas`, `livros`) e 12 produtos.
 Os seeds são idempotentes: subir de novo não duplica nada.
 
-### Rodar um serviço sem Docker (desenvolvimento)
-
-Com um Postgres e/ou Mongo locais, preencha o `.env` (os serviços leem o `.env` da raiz
-automaticamente) e, dentro da pasta do serviço:
-
-```bash
-./mvnw spring-boot:run
-```
-
-Os bancos `usuarios`, `pedidos` e `pagamentos` precisam existir no Postgres
-(`CREATE DATABASE usuarios;` e assim por diante); as tabelas são criadas na subida. O banco-falso
-não precisa de nada: `cd fake-bank && ./mvnw spring-boot:run` sobe na 9000. Sem Docker não há gateway: chame os
-serviços direto e mande os cabeçalhos que o Kong mandaria (`X-User-Id`, `X-User-Email`,
-`X-User-Role`). O Kafka da docker-compose não publica porta: para os serviços falarem com
-eventos fora do Docker, suba um Kafka local e aponte `KAFKA_BROKERS` para ele (padrão
-`localhost:9092`).
-
-### Testes automatizados
-
-```bash
-cd usersApi && ./mvnw test      # H2 em memória, não precisa de banco
-cd catalog-api && ./mvnw test   # Mongo embutido (baixado na 1ª execução), não precisa de Docker
-cd order-api && ./mvnw test     # H2 em memória; o catálogo é simulado (no ar, lento, fora do ar)
-cd notification-api && ./mvnw test   # o SMTP é simulado
-cd payment-api && ./mvnw test   # H2 em memória; o banco do cartão é simulado (aprova, recusa, 503, timeout)
-cd fake-bank && ./mvnw test     # as regras do banco-falso (0002, idempotência, /config, estornos)
-```
-
-Nenhum teste precisa de Kafka: o `KafkaTemplate` é simulado (o teste confere o que seria
-publicado: tópico, chave e envelope) e os listeners são chamados direto com a mensagem, como o
-Kafka faria. No catálogo, a reserva roda contra o Mongo embutido, inclusive com 8 pedidos ao mesmo
-tempo disputando 3 unidades. No pagamentos, o retry e o circuit breaker rodam de verdade contra o
-banco simulado (o circuito abre, passa a meio-aberto e fecha), e o `BancoClient` é testado contra um
-servidor HTTP do próprio JDK, inclusive o timeout.
-
 ---
 
-## Testando a API: arquivos `.http`
+## Arquitetura
 
-Em [`http/`](http), um arquivo por serviço, com todas as rotas e os casos de erro (400, 401, 403,
-404, 409, 503). Todos usam uma URL só, a do gateway (`http://localhost:8080`). No VS Code, instale
-a extensão **REST Client** e use o botão **Send Request**.
+```mermaid
+flowchart LR
+  cliente([Cliente / .http]) -->|":8080"| gateway["Kong (gateway)<br/>JWT · perfis · rate limit · X-Request-Id"]
 
-- [`http/usuarios.http`](http/usuarios.http)
-- [`http/catalogo.http`](http/catalogo.http)
-- [`http/pedidos.http`](http/pedidos.http): login → carrinho → checkout (202) → reenviar o GET
-  até `PAGO` (caminho feliz); o caminho sem estoque (202 → `CANCELADO` com o motivo); e os erros
-  (carrinho vazio, pedido de outra pessoa, cancelar pedido pago, catálogo fora)
-- [`http/fluxo-compra.http`](http/fluxo-compra.http): a saga. Compra aprovada, compra com cartão
-  final 0002 (o estoque volta) e compra cancelada no meio da cobrança (estorno), cada uma
-  consultando o pedido, o pagamento e o estoque no fim; e quem pode ver qual pagamento
-- [`http/demos.http`](http/demos.http): resiliência. Chama o banco-falso direto
-  (`localhost:9000/config`): 30% de falha (o retry resolve), 100% (o circuito abre e fecha sozinho),
-  3 s de latência (timeout e estorno de segurança) e a volta ao normal
+  gateway --> usuarios[usuarios]
+  gateway --> catalogo[catalogo]
+  gateway --> pedidos[pedidos]
+  gateway --> pagamentos[pagamentos]
 
-Rode de cima para baixo: as requisições marcadas com `# @name` guardam a resposta (token, ids)
-para as seguintes.
+  usuarios --- usuariosdb[("Postgres<br/>usuarios")]
+  catalogo --- catalogodb[("Mongo<br/>catalogo")]
+  catalogo --- redis[("Redis<br/>cache da vitrine")]
+  pedidos --- pedidosdb[("Postgres<br/>pedidos")]
+  pagamentos --- pagamentosdb[("Postgres<br/>pagamentos")]
+
+  pedidos -->|"HTTP: preço no checkout"| catalogo
+  pagamentos -->|"HTTP: cobrar e estornar"| banco["banco-falso :9000<br/>(sistema externo)"]
+
+  subgraph kafka["Kafka (KRaft)"]
+    tpedidos[["tópico pedidos"]]
+    testoque[["tópico estoque"]]
+    tpagamentos[["tópico pagamentos"]]
+  end
+
+  pedidos -->|"pedido.criado · pedido.cancelado"| tpedidos
+  catalogo -->|"estoque.reservado · estoque.insuficiente"| testoque
+  pagamentos -->|"pagamento.aprovado · recusado · estornado"| tpagamentos
+
+  tpedidos --> catalogo
+  tpedidos --> pagamentos
+  testoque --> pedidos
+  testoque --> pagamentos
+  tpagamentos --> pedidos
+  tpagamentos --> catalogo
+  tpedidos -.-> notificacoes[notificacoes]
+  testoque -.-> notificacoes
+  tpagamentos -.-> notificacoes
+  notificacoes -->|SMTP| mailpit["Mailpit :8025"]
+  kafkaui["Kafka UI :8090"] -.-> kafka
+```
+
+Linha cheia: quem reage e muda dados. Pontilhada: quem só escuta (o notificacoes, para avisar o
+cliente) ou só olha (o Kafka UI).
+
+| Serviço | Pasta | Banco | Responsabilidade |
+|---|---|---|---|
+| gateway | [`kong/`](kong) | — (declarativo) | Kong: rotas, JWT, perfis, rate limit, X-Request-Id |
+| usuarios | [`usersApi/`](usersApi) | Postgres | cadastro, login (emite o JWT) e endereços |
+| catalogo | [`catalog-api/`](catalog-api) | Mongo + Redis (cache) | produtos, categorias, estoque, reserva e a vitrine com cache |
+| pedidos | [`order-api/`](order-api) | Postgres | carrinho, checkout, status e cancelamento do pedido |
+| pagamentos | [`payment-api/`](payment-api) | Postgres | cobra no banco (timeout, retry, circuit breaker) e estorna |
+| notificacoes | [`notification-api/`](notification-api) | — | escuta os eventos e manda e-mail |
+| banco-falso | [`fake-bank/`](fake-bank) | — (memória) | o banco do cartão: recusa, demora e falha sob comando |
+| kafka · kafka-ui | — | — | Kafka 3.8 (KRaft, um broker), tópicos `pedidos`, `estoque` e `pagamentos` |
+| redis | — | — | cache da vitrine do catálogo, sem persistência |
+| mailpit | — | — | SMTP de mentira com caixa de entrada |
+
+Dentro da rede do Docker, todo serviço escuta na 3000 e é chamado pelo nome
+(`http://catalogo:3000`). Rodando sem Docker, cada um usa a sua porta (3001 a 3005, banco-falso
+na 9000).
+
+Stack: Java 21, Spring Boot 4.1, Spring Data JPA / MongoDB / Redis / JDBC, Spring for Apache Kafka,
+Resilience4j, Kafka 3.8 (KRaft), Redis 7, Kong 3.9 (sem banco), Mailpit, Docker Compose.
 
 ---
 
@@ -181,21 +159,21 @@ válido (401 se não); **admin** = token válido com perfil admin (403 se for cl
 | POST | `/usuarios/me/enderecos` | logado | 201 · 400 |
 | DELETE | `/usuarios/me/enderecos/{id}` | logado | 204 · 404 não existe ou não é meu |
 | GET | `/usuarios` | admin | 200 · 401 · 403 |
-| GET | `/health/usuarios` | público | 200 · 503 |
+| GET | `/health/usuarios` | público | 200 `ok` · 503 `fora do ar` (sem banco) |
 
 ### catalogo
 
 | Método | Rota | Acesso | Retornos |
 |---|---|---|---|
-| GET | `/produtos?categoria=&busca=&ids=` | público | 200 (só ativos; `ids=a,b,c` é a chamada do checkout) |
-| GET | `/produtos/{id}` | público | 200 · 404 |
+| GET | `/produtos?categoria=&busca=&ids=` | público | 200 (só ativos), com `X-Cache` · `ids=a,b,c` é a chamada do checkout, sem cache |
+| GET | `/produtos/{id}` | público | 200 com `X-Cache` · 404 |
 | POST | `/produtos` | admin | 201 · 400 · 401 · 403 · 409 SKU já existe |
 | PUT | `/produtos/{id}` | admin | 200 · 400 · 401 · 403 · 404 · 409 |
 | PATCH | `/produtos/{id}/estoque` | admin | 200 · 400 estoque negativo · 401 · 403 · 404 |
 | DELETE | `/produtos/{id}` | admin | 204 desativado · 401 · 403 · 404 |
-| GET | `/categorias` | público | 200 |
+| GET | `/categorias` | público | 200 com `X-Cache` |
 | POST | `/categorias` | admin | 201 · 400 · 401 · 403 · 409 slug já existe |
-| GET | `/health/catalogo` | público | 200 · 503 |
+| GET | `/health/catalogo` | público | 200 `ok` ou `degradado` (Redis fora) · 503 `fora do ar` (sem Mongo ou Kafka) |
 
 As rotas de admin do catálogo, abertas na aula 1 (ADR-004), agora são fechadas pelo gateway.
 
@@ -210,7 +188,7 @@ As rotas de admin do catálogo, abertas na aula 1 (ADR-004), agora são fechadas
 | GET | `/pedidos` | logado | 200 meus pedidos |
 | GET | `/pedidos/{id}` | logado | 200 pedido com itens e status atual (`motivoCancelamento` se cancelado) · 404 não existe ou não é meu |
 | POST | `/pedidos/{id}/cancelar` | logado | 200 cancelado (em `AGUARDANDO_ESTOQUE` ou `AGUARDANDO_PAGAMENTO`), publica `pedido.cancelado` · 404 · 409 status não permite (ex.: `PAGO`) · 503 Kafka fora (não cancela) |
-| GET | `/health/pedidos` | público | 200 · 503 |
+| GET | `/health/pedidos` | público | 200 `ok` · 503 `fora do ar` (sem banco ou Kafka) |
 
 Corpo do checkout (os itens vêm do carrinho):
 
@@ -235,7 +213,7 @@ logado e o serviço confere dono e admin (`X-User-Id`, `X-User-Role`).
 |---|---|---|---|
 | GET | `/pagamentos/{pedidoId}` | logado | 200 do dono ou de admin · 404 não existe ou é de outra pessoa |
 | GET | `/pagamentos` | logado (admin no serviço) | 200 todos · 403 perfil cliente |
-| GET | `/health/pagamentos` | público | 200 `{ status, banco, circuitoBancoExterno }` (`fechado`, `aberto` ou `meio-aberto`) · 503 banco de dados fora |
+| GET | `/health/pagamentos` | público | 200 `ok` ou `degradado` (circuito aberto) · 503 `fora do ar` (sem banco ou Kafka) |
 
 Resposta: `{ id, pedidoId, usuarioId, valor, forma, cartaoFinal, status, tentativas,
 codigoTransacao, motivo, criadoEm, atualizadoEm }`. Status: `PENDENTE` (gravado antes de chamar o
@@ -403,7 +381,171 @@ banco respondendo: sucesso. O estorno não passa pelo circuit breaker (devolver 
 demais para ser barrado) e tem timeout maior (10 s). O retry fica só nesta camada, a mais próxima de
 quem falha; o pedidos → catálogo continua sem retry (o cliente está esperando o checkout).
 
-### Como demonstrar o circuit breaker
+---
+
+## Observabilidade
+
+Um cliente diz "minha compra não terminou". Três coisas dizem em qual caixa está o problema: a
+saúde de cada serviço, o Docker de olho nela, e os logs com o mesmo id do começo ao fim.
+
+### Saúde: `/health` em todos os serviços
+
+```json
+{ "servico": "pagamentos", "status": "degradado",
+  "dependencias": { "banco": "ok", "kafka": "ok", "circuitoBancoExterno": "aberto" } }
+```
+
+| Status | Quer dizer | HTTP |
+|---|---|---|
+| `ok` | tudo funcionando | 200 |
+| `degradado` | funciona, mas pior: cache fora, circuito do banco do cartão aberto | 200 |
+| `fora do ar` | não consegue trabalhar: sem o próprio banco ou sem o Kafka | 503 |
+
+| Serviço | Dependências testadas | Fora do ar sem | Degradado com |
+|---|---|---|---|
+| usuarios | `banco` (SELECT 1) | banco | — |
+| catalogo | `banco` (ping no Mongo), `kafka`, `cache` (PING no Redis) | banco, Kafka | Redis fora |
+| pedidos | `banco`, `kafka` | banco, Kafka | — |
+| pagamentos | `banco`, `kafka`, `circuitoBancoExterno` | banco, Kafka | circuito aberto ou meio-aberto |
+| notificacoes | `kafka`, `smtp` (só abre a conexão) | Kafka, SMTP | — |
+| banco-falso | — | — | — |
+
+Cada health testa de verdade (uma consulta ao banco, um `describeCluster` no Kafka, um `PING` no
+Redis) e é barato: nada de consulta pesada nem chamada a outro serviço. O pedidos **não** chama o
+`/health` do catálogo: se chamasse, uma queda do catálogo marcaria o pedidos como doente à toa. O
+que só acelera (o cache) ou está fora do nosso controle (o banco do cartão) deixa o serviço
+`degradado`, nunca `fora do ar`. Pelo Kong: `/health/<servico>`, público. O notificacoes não tem
+rota no Kong; o health dele é só para o Docker.
+
+### O Docker de olho
+
+Cada serviço tem `healthcheck` no compose: a cada 10 s, o Docker chama o `/health` de dentro do
+container (`wget`); 3 falhas seguidas (o 503 conta como falha) e ele vira `unhealthy`. O
+`start_period` de 120 s dá tempo de subir (esperar o Kafka, rodar o seed). Os bancos, o Redis e o
+Kafka também têm o seu (`pg_isready`, `mongosh ping`, `redis-cli ping`, `kafka-topics --list`).
+Com `depends_on: service_healthy`, quem depende só sobe quando o outro está de fato pronto: os
+serviços esperam o banco e o Kafka, e o gateway espera os serviços da API.
+
+```bash
+docker compose ps                     # todos (healthy)
+docker compose stop pagamentos-db     # em ~30 s: pagamentos (unhealthy), /health/pagamentos 503
+docker compose start pagamentos-db    # volta a healthy sozinho
+```
+
+O Docker só marca; quem agiria (reiniciar, tirar do balanceamento) é um orquestrador, como o
+Kubernetes.
+
+### Logs: uma compra, um id
+
+O gateway dá um `X-Request-Id` a cada requisição, repassa a todos os serviços e devolve na
+resposta. Cada serviço escreve uma linha por requisição com o id entre colchetes, e toda linha de
+log escrita durante ela também leva o id (ex.: o aviso de catálogo fora, no pedidos):
+
+```
+INFO --- [pedidos] [nio-3000-exec-1] [3c37be51-...] b.c.e.pedidos.config.RequestIdFilter : POST /pedidos -> 202 (48 ms)
+INFO --- [catalogo] [nio-3000-exec-3] [3c37be51-...] b.c.e.catalogo.config.RequestIdFilter : GET /produtos -> 200 (9 ms)
+```
+
+O id também vai dentro de cada evento (`correlationId`) e segue de evento em evento: quem trata o
+evento escreve o log com ele, e os eventos que publica em seguida levam o mesmo id. Uma compra
+inteira, do checkout ao e-mail:
+
+```
+[pedidos]      [3c37be51-...] Publicado pedido.criado do pedido 6f1c... no tópico pedidos
+[catalogo]     [3c37be51-...] Pedido 6f1c...: estoque reservado (2 itens)
+[catalogo]     [3c37be51-...] Publicado estoque.reservado do pedido 6f1c... no tópico estoque
+[notificacoes] [3c37be51-...] E-mail "Recebemos o seu pedido" enviado para c***@loja.com
+[pedidos]      [3c37be51-...] Pedido 6f1c... agora está AGUARDANDO_PAGAMENTO
+[pagamentos]   [3c37be51-...] Pedido 6f1c...: tentativa 1/3 falhou: HTTP 503
+[pagamentos]   [3c37be51-...] Pedido 6f1c...: tentativa 2/3 aprovada (TX-F6A1B2C3)
+[pagamentos]   [3c37be51-...] Publicado pagamento.aprovado do pedido 6f1c... no tópico pagamentos
+[catalogo]     [3c37be51-...] Pedido 6f1c...: venda confirmada, 2 itens saíram do reservado
+[pedidos]      [3c37be51-...] Pedido 6f1c... agora está PAGO
+[notificacoes] [3c37be51-...] E-mail "Pagamento aprovado: pedido confirmado" enviado para c***@loja.com
+```
+
+Com o id da resposta (ou de um chamado de suporte), um grep acha a história inteira, passando por
+pedidos, catálogo, pagamentos e notificações:
+
+```bash
+docker compose logs -t --no-log-prefix | grep 3c37be51 | sort
+```
+
+Toda linha de evento (publicou, recebeu, compensou) tem o id do pedido e o `correlationId`. Nunca
+vão para o log: senha, token, número de cartão (só os 4 últimos dígitos) e e-mail inteiro (sai
+`c***@loja.com`). O `/health`, chamado pelo Docker a cada 10 s, também não é logado.
+
+### O que vigiar
+
+| Sinal | Onde ver | Preocupa quando |
+|---|---|---|
+| Latência do checkout | log do Kong (`docker compose logs gateway`) | passa de 1 s |
+| Erros | respostas 5xx no Kong; pagamentos `ERRO` | sobem de repente |
+| Saturação | lag dos grupos no Kafka UI | só cresce: os serviços estão "no ar" e o trabalho acumula |
+| Dependência externa | `/health/pagamentos` | circuito `aberto` por minutos |
+| Saúde | `docker compose ps` | qualquer `unhealthy` |
+
+---
+
+## Cache da vitrine (Redis)
+
+A vitrine é lida mil vezes para cada vez que um produto muda. O catálogo guarda no Redis a resposta
+inteira de `GET /produtos` (uma chave por filtro), `GET /produtos/{id}` e `GET /categorias`, no
+padrão **cache-aside**:
+
+| `X-Cache` | O que aconteceu |
+|---|---|
+| `MISS` | não estava no Redis: buscou no Mongo, guardou por 60 s (TTL) e devolveu |
+| `HIT` | estava no Redis: devolveu sem ir ao Mongo |
+| `OFF` | Redis fora: foi direto ao Mongo. O cache acelera, não sustenta |
+
+**Invalidação por versão.** As chaves têm a versão no nome: `catalogo:v7:produtos?categoria=roupas&busca=`.
+Toda escrita (criar, alterar, desativar produto; ajustar estoque; criar categoria) e toda mudança
+de estoque por evento (reserva, venda confirmada, devolução) faz um único `INCR catalogo:versao`. A
+próxima leitura monta o nome com a versão 8, não acha (MISS) e busca o dado novo; as chaves da
+versão 7 ninguém mais procura e vencem sozinhas pelo TTL. Um comando apaga todas as listagens de
+uma vez.
+
+- **O checkout nunca usa o cache**: `GET /produtos?ids=...` (a chamada do pedidos) vai sempre ao
+  Mongo. Ninguém paga o preço de uma vitrine guardada.
+- **Redis fora**: a vitrine continua (`OFF`), o `/health/catalogo` fica `degradado` (200), e as
+  próximas requisições pulam o Redis por 5 s em vez de cada uma esperar o timeout (300 ms).
+- **Sem persistência** (`--save ""`, sem AOF): reiniciado, o Redis volta vazio, nunca com dado velho.
+  `maxmemory 64mb` com `volatile-lru`: só descarta chave com TTL (a versão não tem TTL).
+- **TTL com variação** de até 10%: as chaves criadas juntas não vencem todas no mesmo segundo.
+- O que **não** tem cache: carrinho, pedido, pagamento (um valor velho ali custa dinheiro ou
+  confunde quem espera o status mudar).
+
+```bash
+docker compose exec redis redis-cli GET catalogo:versao
+docker compose exec redis redis-cli --scan --pattern 'catalogo:*'
+docker compose exec redis redis-cli TTL 'catalogo:v3:categorias'
+```
+
+---
+
+## Demonstração
+
+Arquivos em [`http/`](http), para a extensão **REST Client** do VS Code. Todos usam uma URL só, a do
+gateway; rode de cima para baixo (as requisições com `# @name` guardam token e ids para as
+seguintes, nada é fixo no arquivo).
+
+| Arquivo | O que mostra |
+|---|---|
+| [`fluxo-completo.http`](http/fluxo-completo.http) | **a entrega final**: login → vitrine → carrinho → checkout (202) → pedido até `PAGO` → pagamento; cartão 0002 (`CANCELADO`, estoque de volta); cancelamento com estorno; cliente em rota de admin (403); cache MISS/HIT e invalidação |
+| [`fluxo-compra.http`](http/fluxo-compra.http) | a saga com mais detalhe: estoque antes e depois, quem vê qual pagamento |
+| [`demos.http`](http/demos.http) | resiliência: 30% de falha (o retry resolve), 100% (o circuito abre e fecha), 3 s de latência (timeout e estorno de segurança) |
+| [`usuarios.http`](http/usuarios.http) · [`catalogo.http`](http/catalogo.http) · [`pedidos.http`](http/pedidos.http) | todas as rotas de cada serviço e os erros (400, 401, 403, 404, 409, 503) |
+
+### A saga, a recusa e o cancelamento
+
+Em `fluxo-completo.http`: a compra com cartão `4111...` termina `PAGO` (pagamento `APROVADO`); com
+cartão final `0002`, o banco recusa, o pedido vira `CANCELADO` com o motivo e o estoque volta;
+com o banco-falso lento (1,5 s), o cancelamento logo depois do checkout termina com o pagamento
+`ESTORNADO` (ou `CANCELADO`, se o cancelamento chegou antes da cobrança). Os e-mails de cada caso
+aparecem no Mailpit.
+
+### O circuit breaker
 
 Com o [`http/demos.http`](http/demos.http), ou com curl:
 
@@ -412,16 +554,66 @@ docker compose logs -f pagamentos banco-falso          # num terminal
 curl -X POST localhost:9000/config -H 'Content-Type: application/json' -d '{"falhaPercent":100}'
 # faça 2 ou 3 compras (pix): cada uma aparece com "tentativa N/3 falhou: HTTP 503"
 # no log: "CIRCUITO ABERTO"; a próxima compra nem chama o banco ("circuito aberto, cobrança não tentada")
-curl localhost:8080/health/pagamentos                  # "circuitoBancoExterno": "aberto"
+curl localhost:8080/health/pagamentos                  # "status": "degradado", circuitoBancoExterno "aberto"
 curl -X POST localhost:9000/config -H 'Content-Type: application/json' -d '{"falhaPercent":0}'
-# espere 15 s: "CIRCUITO MEIO-ABERTO" e /health "meio-aberto"
-# faça mais uma compra: a chamada de teste passa, "CIRCUITO FECHADO" e /health "fechado"
+# espere 15 s: "CIRCUITO MEIO-ABERTO" e /health com o circuito "meio-aberto"
+# faça mais uma compra: a chamada de teste passa, "CIRCUITO FECHADO" e /health "ok", circuito "fechado"
 ```
 
 Os pedidos que pegaram o circuito aberto ficam `CANCELADO` com "Pagamento recusado: banco
 indisponível (circuito aberto).", o estoque volta e o cliente recebe o e-mail com o motivo.
 
-### Limitações conhecidas
+### O cache
+
+```bash
+curl -si localhost:8080/produtos?categoria=roupas | grep X-Cache    # MISS
+curl -si localhost:8080/produtos?categoria=roupas | grep X-Cache    # HIT
+# o admin muda o preço (PUT /produtos/{id}, em catalogo.http): o próximo GET já mostra o novo (MISS)
+docker compose stop redis
+curl -si localhost:8080/produtos?categoria=roupas | grep X-Cache    # OFF, e a vitrine responde
+curl -s localhost:8080/health/catalogo                              # "degradado", 200
+docker compose start redis
+```
+
+---
+
+## Decisões de arquitetura
+
+Uma por arquivo em [`docs/adr/`](docs/adr), com contexto, decisão e consequências (o que se ganhou
+e o que se perdeu).
+
+| ADR | Decisão | Situação |
+|---|---|---|
+| [ADR-001](docs/adr/001-persistencia-poliglota-postgres-no-usuarios-mongo-no.md) | Persistência poliglota: Postgres no usuarios, Mongo no catalogo | em vigor |
+| [ADR-002](docs/adr/002-esquema-do-postgres-gerado-pelo-hibernate-ddl.md) | Esquema do Postgres gerado pelo Hibernate (`ddl-auto=update`), sem migrations | em vigor |
+| [ADR-003](docs/adr/003-jwt-com-spring-security-validado-no-proprio.md) | JWT com Spring Security, validado no próprio serviço usuarios | substituído |
+| [ADR-004](docs/adr/004-rotas-de-admin-do-catalogo-abertas-ate.md) | Rotas de admin do catálogo abertas até a aula 2 | resolvido |
+| [ADR-005](docs/adr/005-delete-de-produto-e-exclusao-logica-ativo.md) | DELETE de produto é exclusão lógica (`ativo = false`) | em vigor |
+| [ADR-006](docs/adr/006-patch-produtos-id-estoque-define-o-valor.md) | `PATCH /produtos/{id}/estoque` define o valor disponível | em vigor |
+| [ADR-007](docs/adr/007-preco-como-bigdecimal-decimal128.md) | Preço como `BigDecimal` / `Decimal128` | em vigor |
+| [ADR-008](docs/adr/008-api-gateway-com-kong-sem-banco-kong.md) | API Gateway com Kong sem banco (`kong/kong.yml`) | em vigor |
+| [ADR-009](docs/adr/009-os-servicos-confiam-nos-cabecalhos-x-user.md) | Os serviços confiam nos cabeçalhos X-User-* e não validam token | em vigor |
+| [ADR-010](docs/adr/010-todo-servico-escuta-na-porta-3000-dentro.md) | Todo serviço escuta na porta 3000 dentro da rede | em vigor |
+| [ADR-011](docs/adr/011-o-checkout-chama-o-catalogo-direto-de.md) | O checkout chama o catálogo direto, de forma síncrona, com timeout de 3 s | em vigor |
+| [ADR-012](docs/adr/012-o-pedido-copia-nome-preco-e-endereco.md) | O pedido copia nome, preço e endereço; sem FK para outros serviços | em vigor |
+| [ADR-013](docs/adr/013-checkout-responde-202-e-o-pedido-nasce.md) | Checkout responde 202 e o pedido nasce em `AGUARDANDO_ESTOQUE` | atualizado |
+| [ADR-014](docs/adr/014-checkout-por-eventos-kafka-em-coreografia.md) | Checkout por eventos (Kafka), em coreografia | em vigor |
+| [ADR-015](docs/adr/015-publicar-depois-do-commit-sem-outbox.md) | Publicar depois do commit, sem Outbox | em vigor |
+| [ADR-016](docs/adr/016-idempotencia-reservas-por-pedido-e-filtro-de.md) | Idempotência: reservas por pedido e filtro de estado | em vigor |
+| [ADR-017](docs/adr/017-spring-for-apache-kafka-no-lugar-do.md) | Spring for Apache Kafka no lugar do kafkajs dos slides | em vigor |
+| [ADR-018](docs/adr/018-saga-coreografada-com-uma-compensacao-por-servico.md) | Saga coreografada, com uma compensação por serviço | em vigor |
+| [ADR-019](docs/adr/019-resiliencia-so-na-chamada-ao-banco-timeout.md) | Resiliência só na chamada ao banco: timeout, retry local e Resilience4j | em vigor |
+| [ADR-020](docs/adr/020-pagamentos-com-jdbc-e-schema-sql-sem.md) | Pagamentos com JDBC e `schema.sql`, sem JPA | em vigor |
+| [ADR-021](docs/adr/021-cancelar-publica-o-pedido-cancelado-antes-do.md) | Cancelar publica o `pedido.cancelado` antes do commit | em vigor |
+| [ADR-022](docs/adr/022-pago-tambem-a-partir-de-aguardando-estoque.md) | `PAGO` também a partir de `AGUARDANDO_ESTOQUE` | em vigor |
+| [ADR-023](docs/adr/023-pagamentos-ouve-os-dois-topicos-num-listener.md) | Pagamentos ouve os dois tópicos num listener só | em vigor |
+| [ADR-024](docs/adr/024-health-com-tres-estados-sem-chamar-outros.md) | `/health` com três estados, sem chamar outros serviços | em vigor |
+| [ADR-025](docs/adr/025-cache-aside-no-redis-so-na-vitrine.md) | Cache-aside no Redis, só na vitrine, invalidado por versão | em vigor |
+| [ADR-026](docs/adr/026-sobe-do-zero-com-um-comando-valores.md) | Sobe do zero com um comando: valores padrão no compose e memória limitada | em vigor |
+
+---
+
+## Limitações conhecidas
 
 | Problema | O que acontece hoje | Como se resolve |
 |---|---|---|
@@ -434,8 +626,15 @@ indisponível (circuito aberto).", o estoque volta e o cliente recebe o e-mail c
 | **Um circuito por réplica** | O estado do circuit breaker fica na memória de cada réplica do pagamentos: com 3 réplicas, o banco recebe até 3 × 5 chamadas ruins antes de todas abrirem, e por alguns segundos elas discordam. | Para o projeto, aceitável. Estado compartilhado (Redis) ou o circuito na infraestrutura (Envoy, Istio). |
 | **Banco caiu = venda perdida** | Banco fora: o pedido é cancelado na hora (fallback mais simples). | Deixar o pedido esperando: pausar o consumo com o circuito aberto, ou uma rotina que cobra os `PENDENTE`, sempre com prazo. Decisão de negócio. |
 | **Banco-falso sem disco** | Reiniciou o banco-falso, esqueceu as cobranças: um estorno depois disso dá 404. | É uma simulação; um banco de verdade guarda tudo. |
+| **Invalidação do cache que falha** | O Redis caiu no instante de uma escrita: o `INCR catalogo:versao` não acontece e, quando ele volta (sem ter reiniciado), a vitrine pode mostrar o dado velho. | O TTL de 60 s limita o estrago. E o preço da compra nunca vem do cache: o checkout consulta o catálogo sem cache. |
+| **Cache invalidado a cada compra** | Toda reserva, confirmação e devolução de estoque troca a versão: com muitas vendas, a vitrine quase não acerta o cache. | Invalidar só as chaves do produto que mudou (uma versão por produto), ou não mostrar o estoque exato na vitrine ("disponível" / "esgotado"). |
+| **Pouca memória** | Com 6 JVMs, Kafka, Mongo, Redis e 3 Postgres num WSL de 2 GB, tudo sobe, mas trocando com o swap: um timeout de 2 s ou 3 s pode estourar à toa. | Os limites de heap do compose (`JAVA_OPTS_SERVICOS`, `KAFKA_HEAP_OPTS`) já ajudam; 4 GB para o Docker é o confortável. |
 | **E-mail repetido** | Pelo menos uma vez: se o mesmo evento for entregue de novo, sai outro e-mail. | Guardar os `id` de evento já tratados. Para um aviso, é aceitável. |
 | **Kafka sem disco próprio e com um broker só** | `docker compose down` apaga os tópicos e os offsets; um broker caído para a mensageria. | Volume para os dados e 3 brokers com fator de replicação 3 (produção). |
+
+---
+
+## Desenvolvimento
 
 ### Formato de erro
 
@@ -449,16 +648,54 @@ Nunca sai stack trace, mensagem do banco ou `senha_hash`. Os erros que o própri
 (401 de token, 403 de perfil, 429 de limite, 404 de rota que não existe) vêm no formato dele:
 `{ "message": "..." }`.
 
----
+### Rodar um serviço sem Docker
 
-## Estrutura
+Com um Postgres e/ou Mongo locais, preencha o `.env` (os serviços leem o `.env` da raiz
+automaticamente) e, dentro da pasta do serviço:
+
+```bash
+./mvnw spring-boot:run
+```
+
+Os bancos `usuarios`, `pedidos` e `pagamentos` precisam existir no Postgres
+(`CREATE DATABASE usuarios;` e assim por diante); as tabelas são criadas na subida. O banco-falso
+não precisa de nada: `cd fake-bank && ./mvnw spring-boot:run` sobe na 9000. Sem Docker não há gateway: chame os
+serviços direto e mande os cabeçalhos que o Kong mandaria (`X-User-Id`, `X-User-Email`,
+`X-User-Role`). O Kafka da docker-compose não publica porta: para os serviços falarem com
+eventos fora do Docker, suba um Kafka local e aponte `KAFKA_BROKERS` para ele (padrão
+`localhost:9092`).
+
+### Testes automatizados
+
+```bash
+cd usersApi && ./mvnw test      # H2 em memória, não precisa de banco
+cd catalog-api && ./mvnw test   # Mongo embutido (baixado na 1ª execução); o Redis é um mapa em memória
+cd order-api && ./mvnw test     # H2 em memória; o catálogo é simulado (no ar, lento, fora do ar)
+cd notification-api && ./mvnw test   # o SMTP é simulado
+cd payment-api && ./mvnw test   # H2 em memória; o banco do cartão é simulado (aprova, recusa, 503, timeout)
+cd fake-bank && ./mvnw test     # as regras do banco-falso (0002, idempotência, /config, estornos)
+```
+
+Nenhum teste precisa de Kafka: o `KafkaTemplate` é simulado (o teste confere o que seria
+publicado: tópico, chave e envelope) e os listeners são chamados direto com a mensagem, como o
+Kafka faria. No catálogo, a reserva roda contra o Mongo embutido, inclusive com 8 pedidos ao mesmo
+tempo disputando 3 unidades. No pagamentos, o retry e o circuit breaker rodam de verdade contra o
+banco simulado (o circuito abre, passa a meio-aberto e fecha), e o `BancoClient` é testado contra um
+servidor HTTP do próprio JDK, inclusive o timeout. No catálogo, o cache roda com um "Redis" em
+memória que pode ser desligado: MISS e depois HIT, invalidação a cada escrita e a cada mudança de
+estoque, e a vitrine respondendo com `X-Cache: OFF` quando ele cai.
+
+### Estrutura
 
 ```
 .
-├── docker-compose.yml        # sobe o gateway, os serviços, os bancos, o Kafka e o Mailpit
+├── docker-compose.yml        # sobe tudo: gateway, serviços, bancos, Redis, Kafka, Mailpit e banco-falso
 ├── kong/kong.yml             # configuração do gateway (Kong sem banco)
-├── .env.example              # variáveis (copie para .env)
-├── http/                     # requisições de teste (REST Client)
+├── .env.example              # opcional: só para trocar valores ou rodar fora do Docker
+├── http/                     # requisições de teste (REST Client); fluxo-completo.http é a entrega final
+├── docs/
+│   ├── adr/                  # as decisões de arquitetura, uma por arquivo
+│   └── discussoes.md         # as perguntas "para discutir em dupla" de cada aula, respondidas
 ├── usersApi/                 # serviço usuarios
 │   ├── Dockerfile
 │   ├── pom.xml
@@ -470,6 +707,7 @@ Nunca sai stack trace, mensagem do banco ou `senha_hash`. Os erros que o própri
 │   ├── pom.xml
 │   └── src/main/java/br/com/ecommerce/catalogo/
 │       ├── document/  repository/  dto/  service/  controller/
+│       ├── cache/            # VitrineCache (cache-aside, versão, X-Cache) e o RedisCacheStore
 │       ├── evento/           # Eventos (envelope), PedidosListener, PagamentosListener, dados do estoque.*
 │       ├── exception/  seed/
 ├── order-api/                # serviço pedidos
@@ -489,7 +727,7 @@ Nunca sai stack trace, mensagem do banco ou `senha_hash`. Os erros que o própri
 │           ├── evento/       # Eventos (envelope), PagamentosListener, dados dos pagamento.*
 │           ├── entity/  repository/  dto/  service/  controller/
 │           └── config/  security/  exception/
-├── notification-api/         # serviço notificacoes (sem banco, sem porta)
+├── notification-api/         # serviço notificacoes (sem banco, sem porta publicada)
 │   ├── Dockerfile
 │   ├── pom.xml
 │   └── src/main/java/br/com/ecommerce/notificacoes/
@@ -498,451 +736,14 @@ Nunca sai stack trace, mensagem do banco ou `senha_hash`. Os erros que o própri
 └── fake-bank/                # banco-falso (sem banco de dados, porta 9000)
     ├── Dockerfile
     ├── pom.xml
-    └── src/main/java/br/com/ecommerce/banco/BancoController.java
+    └── src/main/java/br/com/ecommerce/banco/   # BancoController e o /health
 ```
 
 Cada serviço é independente: seu próprio `pom.xml`, `Dockerfile` e banco. Nenhum importa código
 do outro: o que eles compartilham é o formato dos eventos, e por isso a classe `Eventos` é copiada
-(igual) em cada um.
+(igual) em cada um, assim como a `KafkaSaude` do `/health`.
 
----
+### Para discutir em dupla
 
-## Decisões de arquitetura (ADRs)
-
-### ADR-001 — Persistência poliglota: Postgres no usuarios, Mongo no catalogo
-
-**Contexto.** Usuários têm estrutura fixa (nome, e-mail, senha, perfil), e-mail que não pode
-repetir e endereços que pertencem a um usuário. Produtos têm atributos diferentes por categoria
-(celular: memória e cor; camiseta: tamanho e tecido; livro: autor e páginas), e a vitrine é muito
-mais lida que escrita.
-
-**Decisão.** Cada serviço escolhe o seu banco. **usuarios → Postgres**: o banco garante o e-mail
-único (UNIQUE) e o vínculo do endereço com o usuário (FK com `ON DELETE CASCADE`).
-**catalogo → Mongo**: cada produto é um documento com os seus próprios `atributos`, sem uma coluna
-para cada atributo possível.
-
-**Consequências.** Dois bancos para operar. Não existe JOIN entre usuário e produto, e nem deve
-existir: cada serviço só acessa o próprio banco.
-
-### ADR-002 — Esquema do Postgres gerado pelo Hibernate (`ddl-auto=update`), sem migrations
-
-**Contexto.** A estrutura sugerida nos slides tem uma pasta `migrations/`. Em Java, as opções eram
-Flyway/Liquibase, `schema.sql` ou deixar o Hibernate gerar as tabelas a partir das entities.
-
-**Decisão.** `spring.jpa.hibernate.ddl-auto=update`. As regras do SQL do enunciado estão nas
-anotações das entities: `unique = true` no e-mail, `nullable = false`, `@OnDelete(CASCADE)` na FK,
-`length = 2` na UF, e o perfil como enum (o Hibernate gera um `CHECK` com os valores válidos).
-
-**Consequências.** Menos arquivos para manter nesta fase. Porém o `update` **só adiciona**: nunca
-remove nem renomeia colunas. Se um campo for renomeado, a coluna antiga fica no banco; nesse caso,
-`docker compose down -v`. Diferenças em relação ao SQL do slide: o UUID e o `criado_em` são gerados
-pela aplicação (não por `DEFAULT` no banco), e o perfil é gravado como `CLIENTE`/`ADMIN` (a API
-expõe em minúsculo). Se o esquema começar a mudar com frequência, migrar para Flyway.
-
-### ADR-003 — JWT com Spring Security, validado no próprio serviço usuarios
-
-> **Substituído pelo ADR-009 (aula 2).** O usuarios continua emitindo o token, mas quem valida é
-> o gateway.
-
-**Contexto.** O login devolve um JWT com id, e-mail e perfil, assinado com `JWT_SECRET`. Até o
-gateway existir, o próprio serviço valida o token nas rotas `/me`.
-
-**Decisão.** Spring Security com o OAuth2 Resource Server: a mesma chave HS256 (`JWT_SECRET`, com
-pelo menos 32 caracteres) gera o token no login (`JwtEncoder`) e o valida nas rotas protegidas
-(`JwtDecoder`). A claim `perfil` vira o papel (`ROLE_admin`/`ROLE_cliente`) usado em
-`GET /usuarios`. Senhas com BCrypt. Os 401/403 do Spring Security são repassados ao handler de
-erros para sair no mesmo formato JSON do resto da API.
-
-**Consequências.** Sem biblioteca extra de JWT. Na aula 2 o gateway passa a validar o token com o
-mesmo segredo, e esta configuração pode ser simplificada.
-
-### ADR-004 — Rotas de admin do catálogo abertas até a aula 2
-
-> **Resolvido pelo ADR-008 (aula 2).** As rotas de admin agora exigem token com perfil admin no
-> gateway.
-
-**Contexto.** O catálogo não deveria saber validar o token emitido por outro serviço.
-
-**Decisão.** `POST/PUT/PATCH/DELETE` de produtos e `POST /categorias` ficam sem autenticação nesta
-entrega, como pede o enunciado.
-
-**Consequências.** Qualquer um pode alterar o catálogo enquanto não houver gateway. Aceitável só
-em ambiente de aula. Resolvido na aula 2.
-
-### ADR-005 — DELETE de produto é exclusão lógica (`ativo = false`)
-
-**Decisão.** `DELETE /produtos/{id}` não apaga o documento: marca `ativo = false`. O produto some
-da vitrine (`GET` responde 404), mas continua no banco e pode ser reativado com um `PUT`
-contendo `"ativo": true`.
-
-**Consequências.** Pedidos futuros (aula 2+) continuam podendo referenciar produtos que saíram de
-linha.
-
-### ADR-006 — `PATCH /produtos/{id}/estoque` define o valor disponível
-
-**Decisão.** O corpo `{ "disponivel": 25 }` **define** o estoque disponível (não soma ao atual).
-Valor negativo → 400. O campo `reservado` não é alterado por esta rota: quem mexe nele é a reserva
-por evento (ADR-016).
-
-**Consequências.** A operação é idempotente (repetir a mesma requisição dá o mesmo resultado).
-Ajustes relativos (+/-) ficam para quando houver reserva de estoque.
-
-### ADR-007 — Preço como `BigDecimal` / `Decimal128`
-
-**Decisão.** O preço é `BigDecimal` no Java e `Decimal128` no Mongo, com no máximo 2 casas
-decimais e sempre maior que zero.
-
-**Consequências.** Sem erros de arredondamento de `double` em valores monetários, o que importa
-quando os pedidos começarem a somar preços.
-
-### ADR-008 — API Gateway com Kong sem banco (`kong/kong.yml`)
-
-**Contexto.** Na aula 1, cada serviço tinha a sua porta, o cliente precisava conhecer todas, e as
-rotas de admin do catálogo estavam abertas.
-
-**Decisão.** Kong 3.9 no modo declarativo: toda a configuração num arquivo,
-[`kong/kong.yml`](kong/kong.yml), versionado no Git, sem banco para o gateway. A 8080 é a única
-porta da API. Os níveis de acesso viram plugins por route: **público** (nenhum), **logado**
-(`jwt`) e **admin** (`jwt` + `acl allow [admin]`). Plugins globais: `correlation-id`
-(X-Request-Id), `pre-function` (apaga os X-User-* que vierem de fora) e `post-function` (escreve
-os X-User-* a partir do token). O login tem `rate-limiting` de 10 por minuto por IP.
-
-Os consumers são **perfis, não pessoas**: `cliente` e `admin`. O `jwt` acha o consumer pelo
-campo `perfil` do token (`key_claim_name: perfil`) e o `acl` confere o grupo dele. Assim o
-usuarios não precisa cadastrar cada cliente no Kong.
-
-**Consequências.** Mudar uma rota é mudar um arquivo e rodar `docker compose restart gateway`;
-não dá para alterar a configuração pela Admin API em tempo de execução. Perfil novo (ex.:
-estoquista) é um consumer e um grupo novos no `kong.yml`. Mudança de perfil no banco só vale no
-próximo login (o token antigo vale até vencer, em 2 h). O gateway é ponto único de falha: em
-produção, mais de uma réplica atrás de um balanceador. Os erros que o Kong responde vêm no formato
-dele (`{ "message" }`), não no `{ erro, detalhes }` dos serviços.
-
-### ADR-009 — Os serviços confiam nos cabeçalhos X-User-* e não validam token
-
-**Contexto.** Com o gateway validando o JWT, validar de novo em cada serviço duplicaria o segredo
-e a regra em todos eles.
-
-**Decisão.** O token é validado num lugar só, o Kong. Os serviços leem `X-User-Id` (e o pedidos,
-`X-User-Email`) e respondem 401 quando o cabeçalho não vem. O usuarios continua sendo o único que
-**emite** o JWT (HS256, com `sub`, `email`, `perfil`, `iss` e `exp`); dele saiu o Spring Security
-de validação, ficaram só o encoder de JWT e o BCrypt. As regras de recurso continuam nos serviços:
-"este endereço/pedido é seu?" (404) e "este pedido ainda pode ser cancelado?" (409).
-
-**Consequências.** A segurança depende de **nenhum serviço publicar porta**. Quem alcançasse um
-serviço direto poderia mandar `X-User-Id` de qualquer pessoa (ver a pergunta 4, abaixo). Se um dia
-a rede interna não for confiável, o caminho é mTLS entre serviços (service mesh), fora do escopo.
-
-### ADR-010 — Todo serviço escuta na porta 3000 dentro da rede
-
-**Decisão.** No compose, `PORT=3000` em todos os serviços, que se chamam pelo nome
-(`http://catalogo:3000`). Sem `ports:` publicadas, cada container tem a sua rede e não há
-conflito. Fora do Docker, os padrões continuam 3001, 3002 e 3003, para os três rodarem juntos na
-mesma máquina.
-
-**Consequências.** Uma convenção só, igual ao `kong.yml` de referência da aula. Serviço novo não
-precisa de porta nova.
-
-### ADR-011 — O checkout chama o catálogo direto, de forma síncrona, com timeout de 3 s
-
-**Contexto.** Na compra, o pedidos precisa do preço de agora, e quem sabe disso é o catálogo.
-(Até a aula 2, também do estoque; a partir da aula 3, quem decide o estoque é a reserva por
-evento, ADR-014.)
-
-**Decisão.** `GET http://catalogo:3000/produtos?ids=a,b,c`: uma chamada para todos os produtos do
-carrinho, pela rede interna, sem passar pelo gateway, repassando o `X-Request-Id`. Timeout de
-conexão e de leitura de 3 s. Fora do ar, lento ou com erro → **503** no checkout. O carrinho
-degrada em vez de falhar: com o catálogo fora, `GET /carrinho` devolve produto e quantidade, sem
-preço, com um `aviso`. A lista de pedidos não depende do catálogo.
-
-**Consequências.** Acoplamento temporal: para vender, o catálogo precisa estar no ar naquele
-instante. `docker compose stop catalogo` derruba o checkout, mas não o resto do pedidos. O
-`pedidos` não tem `depends_on` no catálogo de propósito.
-
-### ADR-012 — O pedido copia nome, preço e endereço; sem FK para outros serviços
-
-**Decisão.** Três tabelas no Postgres do pedidos: `carrinho_itens` (chave `usuario_id` +
-`produto_id`, `CHECK quantidade > 0`), `pedidos` (status com `CHECK` nos 4 estados,
-`endereco_entrega` em JSONB) e `itens_pedido` (FK para `pedidos`, que está no mesmo banco). Sem FK
-para usuários e produtos, que moram em outros bancos: quem garante que existem é o código,
-perguntando ao serviço dono. No checkout, nome e preço de cada item são copiados do catálogo, e o
-endereço vem no corpo da requisição e é gravado dentro do pedido. Do cartão, só os 4 últimos
-dígitos.
-
-**Consequências.** O pedido de hoje não muda se o produto mudar de preço amanhã, ou se o cliente
-mudar de endereço: é histórico, não duplicação. O checkout não precisa chamar o usuarios. Como no
-usuarios, o esquema é gerado pelo Hibernate (`ddl-auto=update`, ver ADR-002).
-
-### ADR-013 — Checkout responde 202 e o pedido nasce em `AGUARDANDO_ESTOQUE`
-
-> **Atualizado pelo ADR-014 (aula 3).** O checkout não confere mais o estoque: o catálogo reserva
-> ao receber `pedido.criado`, e o pedido sai de `AGUARDANDO_ESTOQUE` sozinho.
-
-**Decisão.** O checkout confere se cada produto está ativo e tem estoque (409 se não), mas **não
-reserva** o estoque: a reserva entra na aula 3, por evento (Kafka). O pedido é gravado junto com a
-limpeza do carrinho, numa transação só, e a resposta é **202 Accepted** com `Location`.
-
-**Consequências.** Entre o checkout e a reserva, dois clientes podem comprar a última unidade. Na
-aula 3, o catálogo reserva ao receber o evento `pedido.criado` e o pedido sai de
-`AGUARDANDO_ESTOQUE` sozinho. O cliente pode cancelar enquanto o pedido não foi pago (409 depois).
-
-### ADR-014 — Checkout por eventos (Kafka), em coreografia
-
-**Contexto.** Com o checkout em corrente (pedidos → catálogo → pagamento → e-mail), cada serviço a
-mais multiplica a chance de falhar e soma latência, e o pedidos precisa conhecer todos.
-
-**Decisão.** Kafka 3.8 em modo KRaft (um container, broker e controller, sem ZooKeeper). O
-checkout publica `pedido.criado` e responde 202; o resto acontece por eventos (seção
-[Eventos](#eventos)). Coreografia: o pedidos não sabe que o catálogo reserva, só reage ao
-resultado; o notificacoes só escuta. A consulta síncrona ao catálogo continua no checkout, mas só
-para o preço (ADR-011): o preço precisa ser o de agora. O checkout não confere mais o estoque
-(quem decide é a reserva), então o "sem estoque" deixou de ser 409 e virou `CANCELADO` com motivo.
-
-**Consequências.** Consistência eventual: por alguns instantes, o pedido existe e o estoque ainda
-não foi reservado; o mesmo `GET /pedidos/{id}` responde diferente em instantes diferentes. O fluxo
-inteiro só aparece somando todos os serviços (por isso o `correlationId` em todos os eventos e
-logs). Um serviço caído não derruba a compra: os eventos esperam no tópico. Desfazer passos quando
-algo falha no meio é a saga (ADR-018, aula 4).
-
-### ADR-015 — Publicar depois do commit, sem Outbox
-
-**Decisão.** O `pedido.criado` é publicado **depois** do commit da transação que grava o pedido e
-limpa o carrinho: nunca se anuncia um pedido que pode sumir num rollback. O envio espera a
-confirmação do Kafka (até 10 s; o produtor desiste de esperar metadados em 5 s). Se falhar, o
-checkout responde 202 mesmo assim (o pedido existe) e escreve um `ERROR` no log com o id.
-
-**Consequências.** Escrita dupla: se o Kafka cair entre o commit e o publicar, o pedido fica parado
-em `AGUARDANDO_ESTOQUE`. A solução (Outbox) fica como limitação conhecida.
-
-### ADR-016 — Idempotência: reservas por pedido e filtro de estado
-
-**Contexto.** O Kafka entrega pelo menos uma vez: o offset só é confirmado depois que o listener
-termina, então uma falha no meio faz o mesmo evento chegar de novo.
-
-**Decisão.** No **catálogo**, a coleção `reservas` tem índice único em `pedidoId`: a reserva é
-gravada antes de tirar qualquer estoque, e o segundo `pedido.criado` do mesmo pedido dá chave
-duplicada e não reserva de novo; se a reserva já tem resultado, ele é republicado (cobre o caso de
-a publicação ter falhado). Cada item sai do estoque com um update só, com
-`estoque.disponivel >= quantidade` no filtro (`$inc` em `disponivel` e `reservado`): dois pedidos
-ao mesmo tempo não deixam o estoque negativo. Faltou um item, os já reservados são devolvidos
-(tudo ou nada). No **pedidos**, o status só muda a partir do estado esperado, num `UPDATE`
-condicional; o cancelamento pelo cliente usa o mesmo `UPDATE`.
-
-**Consequências.** Reservado não é vendido: o pagamento confirma a venda ou devolve ao disponível
-(ADR-018). O `PATCH /produtos/{id}/estoque` continua definindo o disponível e não mexe no
-reservado.
-
-### ADR-017 — Spring for Apache Kafka no lugar do kafkajs dos slides
-
-**Contexto.** Os exemplos da aula usam Node (kafkajs, nodemailer); os serviços deste projeto são
-Spring Boot.
-
-**Decisão.** `spring-boot-starter-kafka` com `KafkaTemplate<String, String>` e `@KafkaListener`: o
-valor da mensagem é texto (JSON), lido e escrito pela classe `Eventos` de cada serviço, que faz o
-papel do `kafka.js` dos slides. Tópicos declarados como `NewTopic` (o Spring faz o `listTopics` +
-`createTopics`). `auto-offset-reset=earliest` equivale ao `fromBeginning` (só vale para grupo novo).
-O Spring confirma o offset depois que o listener termina, como o kafkajs. Erro no listener: mais 2
-tentativas com 1 s entre elas e depois segue (sem DLQ). Os e-mails saem com
-`spring-boot-starter-mail` para o Mailpit. No compose, `stop_grace_period: 10s` dá tempo de o
-consumer sair do grupo ao parar.
-
-**Consequências.** Mesma semântica dos slides (pelo menos uma vez, chave = pedido, um grupo por
-serviço), com o ecossistema que o projeto já usa. O notificacoes é um Spring Boot sem web
-(`web-application-type=none`): fica no ar enquanto o listener roda.
-
-### ADR-018 — Saga coreografada, com uma compensação por serviço
-
-**Contexto.** A compra grava em três bancos de três serviços; não há transação que desfaça os três.
-O commit em duas fases (2PC) exigiria todos no ar ao mesmo tempo e travaria registros, e o Kafka, o
-Mongo e o banco do cartão não participam dele.
-
-**Decisão.** Saga em **coreografia**, continuando o ADR-014: cada passo é uma transação local e
-cada serviço conhece só a própria compensação (seção [A saga da compra](#a-saga-da-compra)). Nada
-de orquestrador: o fluxo tem poucos passos e o projeto já é coreografado. As compensações são
-idempotentes por filtro de estado: a reserva ganhou os status `CONFIRMADO` e `LIBERADO`, mudados com
-`findAndModify` e o status de origem no filtro; quem recebe a reserva de volta é o único que mexe no
-estoque. O cancelamento depois de confirmado (o cliente cancelou enquanto o banco aprovava) também
-devolve o estoque, porque o pagamentos estorna essa cobrança. A ordem dos passos segue o custo de
-desfazer: reservar (barato) antes de cobrar (estorno custa taxa); e-mail de confirmação só depois do
-pagamento aprovado.
-
-**Consequências.** Sem isolamento: por alguns segundos, outro cliente vê "esgotado" por causa de uma
-reserva que vai ser devolvida. O fluxo inteiro só aparece somando os logs (o `correlationId` segue
-de evento em evento). Uma compensação que falha de vez fica só no log (limitação conhecida).
-
-### ADR-019 — Resiliência só na chamada ao banco: timeout, retry local e Resilience4j
-
-**Contexto.** Os slides usam `fetch` com `AbortSignal.timeout` e o opossum (Node). O banco do cartão
-é o único sistema externo, lento e instável por definição.
-
-**Decisão.** No pagamentos: timeout de 2 s (`SimpleClientHttpRequestFactory`), retry escrito à mão
-(3 tentativas, backoff de 500 ms e 1 s com jitter, só para falhas passageiras, com log de cada uma)
-e o **Resilience4j** como circuit breaker. Só o núcleo (`resilience4j-circuitbreaker`), sem a
-integração Spring, usado pela API de baixo nível (`tryAcquirePermission`, `onSuccess`, `onError`)
-dentro do laço de retry: com o circuito aberto, nem a primeira tentativa acontece. Configuração
-equivalente à do opossum do slide (`failureRateThreshold 50`, `minimumNumberOfCalls 5`,
-`waitDurationInOpenState 15s`), com a transição automática para meio-aberto para o `/health`
-mostrar. Retry só aqui: o Kong já faz retry de conexão e o pedidos → catálogo tem o cliente
-esperando.
-
-**Consequências.** Pior caso de uma cobrança: 3 × 2 s + 1,5 s de espera, numa thread do listener
-(longe do `max.poll.interval` de 5 min). O estado do circuito é por réplica.
-
-### ADR-020 — Pagamentos com JDBC e `schema.sql`, sem JPA
-
-**Decisão.** A idempotência está no SQL: `INSERT ... ON CONFLICT DO NOTHING` com `pedido_id UNIQUE`,
-e toda mudança de status com o status de origem no `WHERE` (`concluir` só de `PENDENTE`,
-`marcarEstornado` só de `APROVADO` ou `CANCELADO`). Com JPA, isso viraria consultas nativas de
-qualquer jeito, então o serviço usa `JdbcTemplate`, e a tabela vem de um
-[`schema.sql`](payment-api/src/main/resources/schema.sql) com `CREATE TABLE IF NOT EXISTS`, igual à
-do slide (o UUID é gerado pela aplicação, como no ADR-002). O mesmo SQL roda no H2 dos testes, em
-modo PostgreSQL.
-
-**Consequências.** O SQL fica à vista e é o mesmo do slide. Mudança de esquema exige mexer no
-`schema.sql` à mão (ou `docker compose down -v`); se crescer, Flyway.
-
-### ADR-021 — Cancelar publica o `pedido.cancelado` antes do commit
-
-**Contexto.** No checkout, o evento sai depois do commit (ADR-015): melhor um pedido parado do que um
-evento de um pedido que sumiu. No cancelamento, a conta é outra: um pedido `CANCELADO` sem o evento
-deixaria o estoque preso e a cobrança seguindo, e o cliente pagaria por um pedido cancelado.
-
-**Decisão.** O `UPDATE` condicional e o `publicar` (que espera o Kafka confirmar) ficam na mesma
-transação. Kafka fora: rollback e **503**, o pedido continua como estava e o cliente tenta de novo.
-
-**Consequências.** Se o commit falhar depois de o evento sair (raro), o catálogo devolve o estoque e
-o pagamentos bloqueia a cobrança, mas o pedido continua `AGUARDANDO_*`. Resolver de vez é o Outbox.
-
-### ADR-022 — `PAGO` também a partir de `AGUARDANDO_ESTOQUE`
-
-**Contexto.** O slide pede `PAGO` só a partir de `AGUARDANDO_PAGAMENTO`. Mas o pedidos e o
-pagamentos reagem ao **mesmo** `estoque.reservado`, e o `pagamento.aprovado` vem por outro tópico,
-sem ordem garantida em relação a ele. Se o pagamento terminar antes de o pedidos tratar o
-`estoque.reservado` (pedidos reiniciando, com lag), o aprovado seria ignorado e o pedido ficaria em
-`AGUARDANDO_PAGAMENTO` para sempre, pago.
-
-**Decisão.** `pagamento.aprovado` leva a `PAGO` a partir de `AGUARDANDO_ESTOQUE` ou
-`AGUARDANDO_PAGAMENTO` (o `pagamento.recusado` já aceitava os dois, como no slide). Um aprovado só
-existe se o estoque foi reservado, então o salto é seguro; o `estoque.reservado` que chegar depois é
-ignorado pelo filtro de estado. O que importa continua valendo: `CANCELADO` nunca vira `PAGO`.
-
-**Consequências.** Nenhum pedido pago fica preso por causa de uma corrida entre tópicos.
-
-### ADR-023 — Pagamentos ouve os dois tópicos num listener só
-
-**Decisão.** Um `@KafkaListener` para `estoque` e `pedidos`, com o `RangeAssignor` (o padrão,
-escrito na configuração): a partição N dos dois tópicos vai para a mesma réplica e os eventos de um
-pedido (mesma chave) são tratados numa thread só. A cobrança e o cancelamento do mesmo pedido não
-rodam ao mesmo tempo. Para o caso raro de troca de réplica no meio, o resultado da cobrança só é
-gravado se o pagamento ainda estiver `PENDENTE`; se o cancelamento chegou antes, o aprovado é
-estornado na hora. Um `PENDENTE` deixado por uma queda é retomado quando o evento chega de novo:
-seguro, porque o banco reconhece a referência.
-
-**Consequências.** Depende de os dois tópicos terem o mesmo número de partições (3).
-
----
-
-## Para discutir em dupla (aula 4: saga e resiliência)
-
-**1. O banco caiu e os pedidos foram cancelados. Como seria deixá-los esperando?** O pagamento
-ficaria `PENDENTE` (ou um `AGUARDANDO_BANCO`), o pedido continuaria `AGUARDANDO_PAGAMENTO` ("em
-processamento") e o estoque continuaria reservado. Quem tenta de novo: pausar o consumo com o
-circuito aberto (o container do `@KafkaListener` tem `pause()`), e os eventos esperam no Kafka; ou
-uma rotina que cobra os `PENDENTE` de tempos em tempos. Sempre com prazo: passadas, por exemplo,
-2 horas, publica `pagamento.recusado` e a saga compensa. Não perde a venda, mas prende estoque,
-deixa o cliente sem resposta e dá mais trabalho. Decisão de negócio; hoje cancelamos.
-
-**2. O estorno também falhou. Onde fica registrado?** Hoje, só no log: o pagamento continua
-`APROVADO` e o pedido, `CANCELADO` (ver [Limitações](#limitações-conhecidas)). O certo: gravar
-`ESTORNO_PENDENTE`, uma rotina que tenta de novo com espera crescente (o estorno pela referência é
-idempotente), alerta para o financeiro e um tópico de erros, e-mail "estorno em processamento", e a
-conciliação diária pegando o que escapou. Compensação que falha não pode sumir.
-
-**3. Por que reservar antes de cobrar?** Desfazer uma reserva é um `UPDATE` no nosso banco, de graça
-e invisível ao cliente; desfazer uma cobrança é um estorno no banco de outra empresa, com taxa, dias
-de prazo e duas linhas no extrato. Cobrando primeiro, todo pedido sem estoque viraria um estorno;
-reservando primeiro, ele nem chega ao banco. O preço: o estoque fica preso enquanto o pagamento
-demora (reservas deveriam ter validade).
-
-**4. Pagamentos com 3 réplicas, cada uma com o seu circuit breaker. É um problema?** Na maioria das
-vezes, não. Cada réplica precisa das próprias falhas para abrir (o banco recebe até 15 chamadas
-ruins, e não 5) e por alguns segundos elas discordam, mas cada uma para de insistir e o banco
-recebe muito menos. Com o Kafka, cada réplica já cuida só das suas partições. Estado único: Redis
-ou service mesh. Para o projeto, um por réplica basta.
-
-**5. Onde colocar o retry?** No pagamentos → banco, sim (3 tentativas): é externo, as falhas são
-passageiras, ninguém está esperando (é por evento) e é idempotente pela referência. No pedidos →
-catálogo, no máximo 1 tentativa curta: o cliente está esperando o checkout, e 3 tentativas de 3 s
-estourariam o tempo dele; melhor 503 rápido (é o que fazemos). Nos dois sem pensar, não: as
-tentativas se multiplicam a cada camada. E o Kong já faz retry de conexão (5 por padrão), uma
-camada que ninguém configurou: para `POST /pedidos`, que não é idempotente, vale olhar esse número.
-
-
-## Para discutir em dupla (aula 3: Kafka e eventos)
-
-**1. O checkout ainda consulta o catálogo de forma síncrona. Dá para tirar essa chamada também? O
-que se perde?** Dá: o pedidos poderia guardar uma cópia dos preços, atualizada por eventos do
-catálogo (`produto.atualizado`), e o checkout nem precisaria do catálogo no ar. Perde-se a
-garantia de que o preço é o de agora: a cópia pode estar alguns instantes atrasada, e a loja
-venderia pelo preço antigo logo depois de um reajuste. Também se perde o 409 imediato de "produto
-indisponível": ele viraria um cancelamento depois, como o sem estoque. É a troca de sempre:
-disponibilidade contra consistência.
-
-**2. O Kafka caiu entre o COMMIT do pedido e o publicar. O que acontece com esse pedido?** Ele
-existe no banco, em `AGUARDANDO_ESTOQUE`, e ninguém fica sabendo: o catálogo não reserva, o e-mail
-não sai, e o pedido fica parado para sempre (o cliente vê "processando"). Hoje só sobra o `ERROR`
-no log. É a escrita dupla; a solução é o Outbox (ver [Limitações](#limitações-conhecidas)).
-
-**3. Por que a chave das mensagens é o id do pedido e não o id do usuário?** O Kafka só garante
-ordem dentro de uma partição, e o que precisa de ordem são os eventos **de um mesmo pedido** (o
-`pedido.cancelado` não pode chegar antes do `pedido.criado`). Com o id do usuário, a ordem por
-pedido também valeria, mas todos os pedidos de um cliente grande (um revendedor, um bot) cairiam
-na mesma partição: ela viraria gargalo e pedidos independentes esperariam uns pelos outros. O id
-do pedido espalha melhor e dá a ordem que importa.
-
-**4. O catálogo tem 3 réplicas e o tópico pedidos, 3 partições. E se subirmos 5 réplicas?** Cada
-partição é lida por um só consumer do grupo: 3 réplicas trabalham e 2 ficam paradas, de reserva
-(assumem uma partição se alguma réplica cair). Para mais paralelismo, mais partições; cuidado que
-aumentar partições muda para qual partição vai cada chave dali em diante.
-
-**5. O cliente cancelou um pedido que já estava com o estoque reservado. Quem devolve o
-estoque?** Na aula 3, ninguém: o pedido ficava `CANCELADO` e as unidades continuavam em `reservado`.
-Desde a aula 4, o pedidos publica `pedido.cancelado` e o catálogo, ao receber, devolve a reserva
-daquele pedido ao disponível: desfazer um passo anterior com outro evento é a saga (ADR-018).
-
-## Para discutir em dupla (aula 2: gateway e pedidos)
-
-**1. O pedidos deveria chamar o catálogo pelo gateway (`localhost:8080`)?** Não. Ganharia o
-rate limit e os logs do gateway também nessa chamada, mas perderia mais: um salto de rede a mais
-(mais latência), o gateway viraria dependência de uma conversa interna, e a chamada precisaria de
-um token, que o pedidos não tem. O gateway é a porta de **fora**. Dentro da rede, serviço fala com
-serviço direto, e o `X-Request-Id` é repassado para manter o rastreamento.
-
-**2. O gateway caiu. O que para?** A loja inteira, para o cliente: nenhuma rota responde, mesmo
-com todos os serviços de pé. Por isso, em produção, o gateway roda com várias réplicas. **E se for
-o catálogo?** Para a vitrine e o checkout (503), e o carrinho mostra os itens sem preço. Login,
-cadastro, endereços, o próprio carrinho e a lista de pedidos continuam funcionando.
-
-**3. Por que o pedido copia o preço em vez de guardar só o `produto_id`?** Porque o pedido é um
-registro do que foi combinado no momento da compra. Se guardasse só o id, um reajuste de preço
-amanhã mudaria o valor de um pedido de ontem, e um produto desativado deixaria o pedido sem nome.
-Além disso, mostrar um pedido não dependeria do catálogo estar no ar.
-
-**4. Um aluno publicou a porta 3003 do pedidos "para testar". Qual o risco?** O pedidos confia
-em `X-User-Id`, sem validar token. Pela 3003, qualquer pessoa manda
-`X-User-Id: <id de outra pessoa>` e vê os pedidos dela, cancela, faz compras no nome dela. O
-gateway (que apagaria esse cabeçalho) é simplesmente contornado. Para testar, use o gateway, ou
-`docker compose exec`, ou rode o serviço localmente fora do compose.
-
-**5. Onde colocar um limite de 10 requisições por segundo por cliente?** No gateway, com o
-plugin `rate-limiting` (`second: 10`), antes de a requisição gastar qualquer serviço. O cuidado
-está no "por cliente": `limit_by: consumer` contaria **por perfil**, e todos os clientes
-dividiriam o mesmo limite. As opções são:
-- `limit_by: ip`, que é simples, mas faz clientes atrás da mesma rede dividirem o limite;
-- `limit_by: header` com `X-User-Id`, desde que o cabeçalho já esteja escrito quando o
-  rate-limiting roda (prioridade 910). Hoje quem escreve é o `post-function` (−1000), depois dele,
-  então a escrita teria que ir para o `pre-function`. Ele pode ler o token antes da validação,
-  porque o `jwt` (1450) roda em seguida e recusa os falsos.
-
-Com várias réplicas do Kong, a contagem tem que ficar num lugar só (`policy: redis`), senão cada
-réplica conta separado.
+As perguntas do fim de cada aula, respondidas com o que o projeto faz:
+[`docs/discussoes.md`](docs/discussoes.md).

@@ -14,7 +14,7 @@
 
 @baseUrl = http://localhost:8080
 
-### Health: serviço e banco ok -> 200
+### Health: { servico, status: ok, dependencias: { banco, kafka } } -> 200
 GET {{baseUrl}}/health/pedidos
 
 ### Login do cliente (seed) -> 200

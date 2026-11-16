@@ -49,7 +49,10 @@ public class RequestIdFilter extends OncePerRequestFilter {
 		} finally {
 			long ms = (System.nanoTime() - inicio) / 1_000_000;
 			// Uma linha por requisição: GET /pagamentos/1 -> 200 (12 ms)
-			log.info("{} {} -> {} ({} ms)", request.getMethod(), request.getRequestURI(), response.getStatus(), ms);
+			// O /health é chamado a cada 10 s pelo Docker: logar cada um enterraria o que importa
+			if (!"/health".equals(request.getRequestURI())) {
+				log.info("{} {} -> {} ({} ms)", request.getMethod(), request.getRequestURI(), response.getStatus(), ms);
+			}
 			MDC.remove(MDC_KEY);
 		}
 	}

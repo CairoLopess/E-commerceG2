@@ -236,21 +236,24 @@ class UsuariosApiTests {
 	@Test
 	@ExtendWith(OutputCaptureExtension.class)
 	void logDeCadaRequisicaoSaiComOXRequestId(CapturedOutput saida) throws Exception {
-		mvc.perform(get("/health").header("X-Request-Id", "3c37be51-teste")).andExpect(status().isOk());
+		mvc.perform(get("/usuarios/me").header("X-Request-Id", "3c37be51-teste"));
 		// Id forjado (com quebra de linha, para inventar uma linha no log) não entra
-		mvc.perform(get("/health").header("X-Request-Id", "falso\nlinha forjada")).andExpect(status().isOk());
+		mvc.perform(get("/usuarios/me").header("X-Request-Id", "falso\nlinha forjada"));
+		// O /health não vai para o log: o Docker o chama a cada 10 s
+		mvc.perform(get("/health").header("X-Request-Id", "health-teste"));
 
-		assertThat(saida.getOut().lines().filter(linha -> linha.contains("GET /health -> 200")))
+		assertThat(saida.getOut().lines().filter(linha -> linha.contains("GET /usuarios/me -> 401")))
 			.anyMatch(linha -> linha.contains("[3c37be51-teste]"));
-		assertThat(saida.getOut()).doesNotContain("linha forjada");
+		assertThat(saida.getOut()).doesNotContain("linha forjada").doesNotContain("GET /health");
 	}
 
 	@Test
-	void healthDevolveOk() throws Exception {
+	void healthDevolveOkComOBanco() throws Exception {
 		mvc.perform(get("/health"))
 			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.servico").value("usuarios"))
 			.andExpect(jsonPath("$.status").value("ok"))
-			.andExpect(jsonPath("$.banco").value("ok"));
+			.andExpect(jsonPath("$.dependencias.banco").value("ok"));
 	}
 
 	// Cadastra e devolve o id: é o que o gateway mandaria no X-User-Id

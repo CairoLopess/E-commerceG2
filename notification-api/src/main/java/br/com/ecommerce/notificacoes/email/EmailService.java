@@ -37,7 +37,19 @@ public class EmailService {
 		mensagem.setSubject(assunto);
 		mensagem.setText(texto);
 		smtp.send(mensagem);
-		log.info("E-mail \"{}\" enviado para {}", assunto, para);
+		log.info("E-mail \"{}\" enviado para {}", assunto, mascarar(para));
+	}
+
+	/**
+	 * Log é lido por muita gente e guardado por muito tempo: o e-mail do cliente não vai inteiro.
+	 * cliente@loja.com -> c***@loja.com (dá para conferir o domínio e a primeira letra, só).
+	 */
+	static String mascarar(String email) {
+		int arroba = email.indexOf('@');
+		if (arroba <= 0) {
+			return "***";
+		}
+		return email.charAt(0) + "***" + email.substring(arroba);
 	}
 
 }
