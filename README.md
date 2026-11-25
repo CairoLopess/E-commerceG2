@@ -20,8 +20,9 @@ docker compose up -d --build
 ```
 
 A primeira vez compila 6 imagens Java e leva alguns minutos. As tabelas, os seeds e os tópicos do
-Kafka são criados sozinhos na subida, e subir de novo não duplica nada. O gateway só abre a porta
-quando os serviços da API estão de pé: quando o comando termina, a loja já vende.
+Kafka são criados sozinhos na subida, e subir de novo não duplica nada. O gateway só sobe depois
+que os serviços da API ficam `healthy`; quando o comando termina, falta só o próprio Kong terminar de
+iniciar (alguns segundos, até ele aparecer `healthy`).
 
 ```bash
 docker compose ps        # todos "Up ... (healthy)"
@@ -292,7 +293,8 @@ E-mails (Mailpit): "Recebemos o seu pedido", "Seu pedido foi cancelado: sem esto
 aprovado: pedido confirmado", "Seu pedido foi cancelado: pagamento recusado" (com o motivo) e "Seu
 pagamento foi estornado".
 
-- **Envelope**, igual em todos os serviços (a classe `evento/Eventos` é a mesma nos três):
+- **Envelope**, igual em todos os serviços (a classe `evento/Eventos` é a mesma nos quatro que usam
+  Kafka):
 
   ```jsonc
   {
@@ -479,7 +481,7 @@ vão para o log: senha, token, número de cartão (só os 4 últimos dígitos) e
 
 | Sinal | Onde ver | Preocupa quando |
 |---|---|---|
-| Latência do checkout | log do Kong (`docker compose logs gateway`) | passa de 1 s |
+| Latência do checkout | a linha de cada requisição no log do pedidos (`POST /pedidos -> 202 (48 ms)`) ou o cabeçalho `X-Kong-Upstream-Latency` da resposta | passa de 1 s |
 | Erros | respostas 5xx no Kong; pagamentos `ERRO` | sobem de repente |
 | Saturação | lag dos grupos no Kafka UI | só cresce: os serviços estão "no ar" e o trabalho acumula |
 | Dependência externa | `/health/pagamentos` | circuito `aberto` por minutos |
@@ -566,12 +568,12 @@ indisponível (circuito aberto).", o estoque volta e o cliente recebe o e-mail c
 ### O cache
 
 ```bash
-curl -si localhost:8080/produtos?categoria=roupas | grep X-Cache    # MISS
-curl -si localhost:8080/produtos?categoria=roupas | grep X-Cache    # HIT
+curl -si 'localhost:8080/produtos?categoria=roupas' | grep X-Cache    # MISS
+curl -si 'localhost:8080/produtos?categoria=roupas' | grep X-Cache    # HIT
 # o admin muda o preço (PUT /produtos/{id}, em catalogo.http): o próximo GET já mostra o novo (MISS)
 docker compose stop redis
-curl -si localhost:8080/produtos?categoria=roupas | grep X-Cache    # OFF, e a vitrine responde
-curl -s localhost:8080/health/catalogo                              # "degradado", 200
+curl -si 'localhost:8080/produtos?categoria=roupas' | grep X-Cache    # OFF, e a vitrine responde
+curl -s localhost:8080/health/catalogo                                # "degradado", 200
 docker compose start redis
 ```
 
@@ -628,7 +630,7 @@ e o que se perdeu).
 | **Banco-falso sem disco** | Reiniciou o banco-falso, esqueceu as cobranças: um estorno depois disso dá 404. | É uma simulação; um banco de verdade guarda tudo. |
 | **Invalidação do cache que falha** | O Redis caiu no instante de uma escrita: o `INCR catalogo:versao` não acontece e, quando ele volta (sem ter reiniciado), a vitrine pode mostrar o dado velho. | O TTL de 60 s limita o estrago. E o preço da compra nunca vem do cache: o checkout consulta o catálogo sem cache. |
 | **Cache invalidado a cada compra** | Toda reserva, confirmação e devolução de estoque troca a versão: com muitas vendas, a vitrine quase não acerta o cache. | Invalidar só as chaves do produto que mudou (uma versão por produto), ou não mostrar o estoque exato na vitrine ("disponível" / "esgotado"). |
-| **Pouca memória** | Com 6 JVMs, Kafka, Mongo, Redis e 3 Postgres num WSL de 2 GB, tudo sobe, mas trocando com o swap: um timeout de 2 s ou 3 s pode estourar à toa. | Os limites de heap do compose (`JAVA_OPTS_SERVICOS`, `KAFKA_HEAP_OPTS`) já ajudam; 4 GB para o Docker é o confortável. |
+| **Pouca memória** | Com 6 JVMs, Kafka, Mongo, Redis e 3 Postgres num WSL de 2 GB, tudo sobe, mas trocando com o swap: um timeout de 2 s ou 3 s pode estourar à toa, e a VM pode travar. | Os limites de heap do compose (`JAVA_OPTS_SERVICOS`, `KAFKA_HEAP_OPTS`) já ajudam; com 3 GB (e 4 GB de swap) para o WSL, a compra inteira passa sem timeout falso (ver [Subir](#subir)). |
 | **E-mail repetido** | Pelo menos uma vez: se o mesmo evento for entregue de novo, sai outro e-mail. | Guardar os `id` de evento já tratados. Para um aviso, é aceitável. |
 | **Kafka sem disco próprio e com um broker só** | `docker compose down` apaga os tópicos e os offsets; um broker caído para a mensageria. | Volume para os dados e 3 brokers com fator de replicação 3 (produção). |
 
@@ -663,7 +665,8 @@ não precisa de nada: `cd fake-bank && ./mvnw spring-boot:run` sobe na 9000. Sem
 serviços direto e mande os cabeçalhos que o Kong mandaria (`X-User-Id`, `X-User-Email`,
 `X-User-Role`). O Kafka da docker-compose não publica porta: para os serviços falarem com
 eventos fora do Docker, suba um Kafka local e aponte `KAFKA_BROKERS` para ele (padrão
-`localhost:9092`).
+`localhost:9092`). O catálogo procura o Redis em `localhost:6379` (`REDIS_HOST`); sem ele, a vitrine
+funciona com `X-Cache: OFF` e o `/health` fica `degradado`.
 
 ### Testes automatizados
 
