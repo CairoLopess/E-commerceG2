@@ -13,6 +13,9 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
+import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -21,6 +24,7 @@ import java.util.Map;
 import java.util.UUID;
 
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -30,13 +34,17 @@ import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.MediaType;
+import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
 import com.jayway.jsonpath.JsonPath;
 
+import br.com.ecommerce.catalogo.cache.VitrineCache;
 import br.com.ecommerce.catalogo.document.Estoque;
+import br.com.ecommerce.catalogo.evento.KafkaSaude;
 import br.com.ecommerce.catalogo.document.Produto;
 import br.com.ecommerce.catalogo.repository.CategoriaRepository;
 import br.com.ecommerce.catalogo.repository.ProdutoRepository;
@@ -49,6 +57,7 @@ import de.flapdoodle.reverse.TransitionWalker;
 
 @SpringBootTest
 @AutoConfigureMockMvc
+@ActiveProfiles("test")
 class CatalogoApiTests {
 
 	// Mongo de verdade, baixado e iniciado pelo flapdoodle (na primeira vez demora o download)
@@ -82,6 +91,22 @@ class CatalogoApiTests {
 
 	@Autowired
 	CategoriaRepository categoriaRepository;
+
+	@Autowired
+	MemoriaCacheStore cacheStore;
+
+	@Autowired
+	VitrineCache vitrineCache;
+
+	// O /health pergunta ao Kafka; nos testes não há Kafka
+	@MockitoBean
+	KafkaSaude kafkaSaude;
+
+	@BeforeEach
+	void kafkaNoArECacheDesligado() {
+		when(kafkaSaude.noAr()).thenReturn(true);
+		cacheStore.desligar();
+	}
 
 	@Test
 	void seedCriaCategoriasEProdutosEEhIdempotente() throws Exception {
@@ -257,21 +282,157 @@ class CatalogoApiTests {
 	@Test
 	@ExtendWith(OutputCaptureExtension.class)
 	void logDeCadaRequisicaoSaiComOXRequestId(CapturedOutput saida) throws Exception {
-		mvc.perform(get("/health").header("X-Request-Id", "3c37be51-teste")).andExpect(status().isOk());
+		mvc.perform(get("/categorias").header("X-Request-Id", "3c37be51-teste")).andExpect(status().isOk());
 		// Id forjado (com quebra de linha, para inventar uma linha no log) não entra
-		mvc.perform(get("/health").header("X-Request-Id", "falso\nlinha forjada")).andExpect(status().isOk());
+		mvc.perform(get("/categorias").header("X-Request-Id", "falso\nlinha forjada")).andExpect(status().isOk());
+		// O /health não vai para o log: o Docker o chama a cada 10 s
+		mvc.perform(get("/health").header("X-Request-Id", "health-teste"));
 
-		assertThat(saida.getOut().lines().filter(linha -> linha.contains("GET /health -> 200")))
+		assertThat(saida.getOut().lines().filter(linha -> linha.contains("GET /categorias -> 200")))
 			.anyMatch(linha -> linha.contains("[3c37be51-teste]"));
-		assertThat(saida.getOut()).doesNotContain("linha forjada");
+		assertThat(saida.getOut()).doesNotContain("linha forjada").doesNotContain("GET /health");
+	}
+
+	// ---------- /health ----------
+
+	@Test
+	void healthComTudoNoArDevolveOk() throws Exception {
+		ligarCache();
+
+		mvc.perform(get("/health"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.servico").value("catalogo"))
+			.andExpect(jsonPath("$.status").value("ok"))
+			.andExpect(jsonPath("$.dependencias.banco").value("ok"))
+			.andExpect(jsonPath("$.dependencias.kafka").value("ok"))
+			.andExpect(jsonPath("$.dependencias.cache").value("ok"));
 	}
 
 	@Test
-	void healthDevolveOk() throws Exception {
+	void semCacheFicaDegradadoMasNoAr() throws Exception {
 		mvc.perform(get("/health"))
 			.andExpect(status().isOk())
-			.andExpect(jsonPath("$.status").value("ok"))
-			.andExpect(jsonPath("$.banco").value("ok"));
+			.andExpect(jsonPath("$.status").value("degradado"))
+			.andExpect(jsonPath("$.dependencias.cache").value("fora"));
+	}
+
+	@Test
+	void semKafkaEstaForaDoAr() throws Exception {
+		when(kafkaSaude.noAr()).thenReturn(false);
+
+		mvc.perform(get("/health"))
+			.andExpect(status().isServiceUnavailable())
+			.andExpect(jsonPath("$.status").value("fora do ar"))
+			.andExpect(jsonPath("$.dependencias.kafka").value("fora"));
+	}
+
+	// ---------- cache da vitrine ----------
+
+	@Test
+	void vitrinePrimeiroMissDepoisHitComOMesmoConteudo() throws Exception {
+		ligarCache();
+
+		String primeira = mvc.perform(get("/produtos?categoria=livros"))
+			.andExpect(status().isOk())
+			.andExpect(header().string("X-Cache", "MISS"))
+			.andReturn().getResponse().getContentAsString();
+		String segunda = mvc.perform(get("/produtos?categoria=livros"))
+			.andExpect(header().string("X-Cache", "HIT"))
+			.andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+			.andReturn().getResponse().getContentAsString();
+
+		assertThat(segunda).isEqualTo(primeira);
+		// Outro filtro é outra chave
+		mvc.perform(get("/produtos?categoria=roupas")).andExpect(header().string("X-Cache", "MISS"));
+		// "Livros " e "livros" são a mesma busca
+		mvc.perform(get("/produtos?categoria=livros ")).andExpect(header().string("X-Cache", "HIT"));
+	}
+
+	@Test
+	void adminMudaOPrecoEOProximoGetJaMostraONovo() throws Exception {
+		ligarCache();
+		String id = criarProduto(skuNovo());
+		mvc.perform(get("/produtos/" + id)).andExpect(header().string("X-Cache", "MISS"));
+		mvc.perform(get("/produtos/" + id)).andExpect(header().string("X-Cache", "HIT"))
+			.andExpect(jsonPath("$.preco").value(199.90));
+
+		mvc.perform(put("/produtos/" + id).contentType(MediaType.APPLICATION_JSON).content("""
+				{"sku":"%s","nome":"Livro de teste","categoria":"livros","preco":149.90}"""
+			.formatted(JsonPath.<String>read(mvc.perform(get("/produtos/" + id)).andReturn().getResponse()
+				.getContentAsString(), "$.sku"))))
+			.andExpect(status().isOk());
+
+		// A escrita trocou a versão: a chave velha não é mais procurada
+		mvc.perform(get("/produtos/" + id))
+			.andExpect(header().string("X-Cache", "MISS"))
+			.andExpect(jsonPath("$.preco").value(149.90));
+	}
+
+	@Test
+	void estoqueAjustadoECategoriaNovaInvalidamAVitrine() throws Exception {
+		ligarCache();
+		String id = criarProduto(skuNovo());
+		mvc.perform(get("/categorias")).andExpect(header().string("X-Cache", "MISS"));
+		mvc.perform(get("/categorias")).andExpect(header().string("X-Cache", "HIT"));
+
+		mvc.perform(patch("/produtos/" + id + "/estoque").contentType(MediaType.APPLICATION_JSON)
+				.content("{\"disponivel\":3}")).andExpect(status().isOk());
+		mvc.perform(get("/categorias")).andExpect(header().string("X-Cache", "MISS"));
+
+		String slug = "cat-" + UUID.randomUUID().toString().substring(0, 8);
+		mvc.perform(post("/categorias").contentType(MediaType.APPLICATION_JSON)
+				.content("{\"nome\":\"Nova\",\"slug\":\"" + slug + "\"}")).andExpect(status().isCreated());
+		mvc.perform(get("/categorias"))
+			.andExpect(header().string("X-Cache", "MISS"))
+			.andExpect(jsonPath("$[*].slug", hasItem(slug)));
+	}
+
+	@Test
+	void acentoSobreviveAoCache() throws Exception {
+		ligarCache();
+		String sku = skuNovo();
+		String id = JsonPath.read(mvc.perform(post("/produtos").contentType(MediaType.APPLICATION_JSON).content("""
+				{"sku":"%s","nome":"Calção Térmico","categoria":"roupas","preco":89.90,
+				 "atributos":{"tamanho":"M"},"estoque":{"disponivel":5}}""".formatted(sku)))
+			.andExpect(status().isCreated()).andReturn().getResponse().getContentAsString(), "$.id");
+
+		mvc.perform(get("/produtos/" + id)).andExpect(header().string("X-Cache", "MISS"));
+		mvc.perform(get("/produtos/" + id))
+			.andExpect(header().string("X-Cache", "HIT"))
+			.andExpect(jsonPath("$.nome").value("Calção Térmico"));
+	}
+
+	@Test
+	void produtoQueNaoExisteNaoEhGuardado() throws Exception {
+		ligarCache();
+		mvc.perform(get("/produtos/nao-existe")).andExpect(status().isNotFound());
+		mvc.perform(get("/produtos/nao-existe")).andExpect(status().isNotFound());
+	}
+
+	@Test
+	void redisForaAVitrineContinuaComOff() throws Exception {
+		mvc.perform(get("/produtos"))
+			.andExpect(status().isOk())
+			.andExpect(header().string("X-Cache", "OFF"))
+			.andExpect(jsonPath("$", hasSize(greaterThanOrEqualTo(10))));
+		mvc.perform(get("/categorias")).andExpect(status().isOk()).andExpect(header().string("X-Cache", "OFF"));
+	}
+
+	@Test
+	void checkoutPorIdsNaoPassaPeloCache() throws Exception {
+		ligarCache();
+		String id = criarProduto(skuNovo());
+
+		mvc.perform(get("/produtos?ids=" + id))
+			.andExpect(status().isOk())
+			.andExpect(header().doesNotExist("X-Cache"))
+			.andExpect(jsonPath("$[0].id").value(id));
+	}
+
+	private void ligarCache() {
+		cacheStore.ligar();
+		// O /health confere o cache e tira a pausa de 5 s de quando ele estava "fora"
+		vitrineCache.noAr();
 	}
 
 	private static String skuNovo() {

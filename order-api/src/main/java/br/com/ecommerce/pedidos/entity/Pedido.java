@@ -57,6 +57,10 @@ public class Pedido {
 	@Column(length = 4)
 	private String cartaoFinal;
 
+	// Por que foi cancelado: "Estoque insuficiente para ..." (evento) ou "Cancelado pelo cliente."
+	@Column(length = 300)
+	private String motivoCancelamento;
+
 	@Column(nullable = false)
 	private Instant criadoEm;
 
@@ -82,10 +86,6 @@ public class Pedido {
 	public void adicionarItem(ItemPedido item) {
 		itens.add(item);
 		valorTotal = valorTotal.add(item.subtotal());
-	}
-
-	public void cancelar() {
-		this.status = StatusPedido.CANCELADO;
 	}
 
 	public UUID getId() {
@@ -118,6 +118,10 @@ public class Pedido {
 
 	public String getCartaoFinal() {
 		return cartaoFinal;
+	}
+
+	public String getMotivoCancelamento() {
+		return motivoCancelamento;
 	}
 
 	public Instant getCriadoEm() {

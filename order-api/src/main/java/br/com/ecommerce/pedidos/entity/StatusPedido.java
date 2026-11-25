@@ -1,8 +1,12 @@
 package br.com.ecommerce.pedidos.entity;
 
 /**
- * O pedido já nasce com os 4 estados. Nesta aula ele fica parado em AGUARDANDO_ESTOQUE;
- * quem o faz andar é o Kafka, nas próximas aulas (estoque reservado, pagamento aprovado).
+ * Cada seta é um evento, e só vale a partir do estado de origem:
+ * AGUARDANDO_ESTOQUE --estoque.reservado--> AGUARDANDO_PAGAMENTO --pagamento.aprovado--> PAGO
+ * AGUARDANDO_ESTOQUE --estoque.insuficiente--> CANCELADO
+ * AGUARDANDO_ESTOQUE ou AGUARDANDO_PAGAMENTO --pagamento.recusado--> CANCELADO
+ * AGUARDANDO_ESTOQUE ou AGUARDANDO_PAGAMENTO --cliente cancela--> CANCELADO (publica pedido.cancelado)
+ * PAGO e CANCELADO são finais: um CANCELADO não volta a PAGO porque o banco aprovou atrasado.
  */
 public enum StatusPedido {
 

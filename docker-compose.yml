@@ -1,6 +1,28 @@
-# Sobe o gateway, os serviços e os bancos: docker compose up --build
-# Só o gateway publica porta (8080). Dentro da rede, todo serviço escuta na 3000.
-# Antes, copie .env.example para .env (o JWT_SECRET é obrigatório).
+# Sobe tudo do zero, sem nenhum passo a mais: docker compose up -d --build
+# Gateway, 5 serviços, 4 bancos, Redis, Kafka, Kafka UI, Mailpit e o banco-falso. Tabelas, seeds e
+# tópicos são criados sozinhos na subida. Nenhum .env é necessário: toda variável tem valor padrão.
+# Só o gateway publica porta para a API (8080). Dentro da rede, todo serviço HTTP escuta na 3000.
+# Ferramentas, só nesta máquina: Kafka UI (8090) e a caixa de entrada do Mailpit (8025).
+# Fora do Kong: o banco-falso (9000), que faz o papel do banco do cartão (um sistema que não é nosso).
+
+# Memória: tudo junto (6 JVMs, Kafka, Mongo, 3 Postgres) precisa caber num WSL de 2 GB.
+# Sem limite, cada JVM reserva até 1/4 da RAM e o Kafka pede 1 GB de heap: a VM trava trocando com o swap.
+# Heap pequeno, GC serial e JIT só de nível 1 bastam para uma loja de aula. Precisa de mais? Troque no .env.
+# Segredo do JWT: o mesmo no usuarios (assina) e no Kong (confere). O padrão existe para o sistema
+# subir num clone novo sem .env; fora da aula, defina JWT_SECRET (pelo menos 32 caracteres).
+x-jwt-secret: &jwt-secret ${JWT_SECRET:-segredo-de-desenvolvimento-troque-fora-da-aula-0123456789}
+
+# O Docker chama o /health de dentro do container a cada 10 s: 2xx = healthy; 3 falhas seguidas
+# (o 503 de "fora do ar" conta como falha) = unhealthy. start_period: folga para subir (esperar o
+# Kafka, rodar o seed) sem ser marcado como doente.
+x-healthcheck-servico: &healthcheck-servico
+  test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:3000/health"]
+  interval: 10s
+  timeout: 5s
+  retries: 3
+  start_period: 120s
+
+x-jvm-servico: &jvm-servico ${JAVA_OPTS_SERVICOS:--Xms32m -Xmx128m -Xss512k -XX:MaxMetaspaceSize=160m -XX:ReservedCodeCacheSize=40m -XX:+UseSerialGC -XX:TieredStopAtLevel=1}
 
 services:
 
@@ -22,36 +44,54 @@ services:
   usuarios:
     build: ./usersApi
     environment:
+      JAVA_TOOL_OPTIONS: *jvm-servico
       PORT: 3000
       # Dentro da rede do Docker, o banco é encontrado pelo nome do serviço
       DB_URL: jdbc:postgresql://usuarios-db:5432/usuarios
       DB_USER: ${DB_USER:-postgres}
       DB_PASSWORD: ${DB_PASSWORD:-postgres}
-      JWT_SECRET: ${JWT_SECRET:?defina JWT_SECRET no .env (copie de .env.example)}
+      JWT_SECRET: *jwt-secret
       JWT_EXPIRACAO: ${JWT_EXPIRACAO:-2h}
     depends_on:
       usuarios-db:
         condition: service_healthy
+    healthcheck: *healthcheck-servico
 
   # ---------- catalogo: Mongo ----------
   catalogo-db:
     image: mongo:8
+    # O cache do WiredTiger usa metade da RAM por padrão: 256 MB sobram para o catálogo
+    command: ["--wiredTigerCacheSizeGB", "0.25"]
     volumes:
       - catalogo-db-data:/data/db
+    # O mongosh é um Node: com pouca memória (WSL com 2 GB e o Kafka no ar) ele leva mais de 10 s
+    # só para subir. Timeout folgado, senão o banco é dado como unhealthy e o catalogo não sobe.
     healthcheck:
       test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
-      interval: 5s
-      timeout: 5s
+      interval: 10s
+      timeout: 30s
       retries: 10
+      start_period: 30s
 
   catalogo:
     build: ./catalog-api
     environment:
+      JAVA_TOOL_OPTIONS: *jvm-servico
       PORT: 3000
-      MONGODB_URI: mongodb://catalogo-db:27017/catalogo
+      MONGODB_URI: mongodb://catalogo-db:27017/catalogo?serverSelectionTimeoutMS=2000
+      KAFKA_BROKERS: kafka:9092
+      REDIS_HOST: redis
     depends_on:
       catalogo-db:
         condition: service_healthy
+      kafka:
+        condition: service_healthy
+      # Só "iniciado": o cache acelera, não sustenta. Sem ele, a vitrine responde (X-Cache: OFF).
+      redis:
+        condition: service_started
+    healthcheck: *healthcheck-servico
+    # Ao parar, o consumer sai do grupo na hora e as partições passam para outra réplica
+    stop_grace_period: 10s
 
   # ---------- pedidos: Postgres próprio ----------
   pedidos-db:
@@ -71,17 +111,160 @@ services:
   pedidos:
     build: ./order-api
     environment:
+      JAVA_TOOL_OPTIONS: *jvm-servico
       PORT: 3000
       PEDIDOS_DB_URL: jdbc:postgresql://pedidos-db:5432/pedidos
       DB_USER: ${DB_USER:-postgres}
       DB_PASSWORD: ${DB_PASSWORD:-postgres}
       # Chamada direta pela rede interna, sem passar pelo gateway
       CATALOGO_URL: http://catalogo:3000
+      KAFKA_BROKERS: kafka:9092
     # Sem depends_on no catalogo de propósito: com o catálogo fora, o carrinho e a lista
     # de pedidos continuam funcionando; só o checkout responde 503.
     depends_on:
       pedidos-db:
         condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck: *healthcheck-servico
+    stop_grace_period: 10s
+
+  # ---------- notificacoes: só escuta ----------
+  # Sem banco, sem porta publicada, sem rota no Kong: ninguém de fora chama. O HTTP interno existe
+  # só para o healthcheck do Docker (/health com o Kafka e o SMTP).
+  notificacoes:
+    build: ./notification-api
+    environment:
+      JAVA_TOOL_OPTIONS: *jvm-servico
+      PORT: 3000
+      KAFKA_BROKERS: kafka:9092
+      SMTP_HOST: mailpit
+      SMTP_PORT: 1025
+    depends_on:
+      kafka:
+        condition: service_healthy
+      mailpit:
+        condition: service_healthy
+    healthcheck: *healthcheck-servico
+    stop_grace_period: 10s
+
+  # ---------- pagamentos: Postgres próprio ----------
+  pagamentos-db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: pagamentos
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+    volumes:
+      - pagamentos-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d pagamentos"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  pagamentos:
+    build: ./payment-api
+    environment:
+      JAVA_TOOL_OPTIONS: *jvm-servico
+      PORT: 3000
+      PAGAMENTOS_DB_URL: jdbc:postgresql://pagamentos-db:5432/pagamentos
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+      # O banco do cartão, pela rede interna (timeout de 2 s, retry e circuit breaker no serviço)
+      BANCO_URL: http://banco-falso:3000
+      KAFKA_BROKERS: kafka:9092
+    # Sem depends_on no banco-falso de propósito: com ele fora, o circuito abre e os pedidos
+    # são cancelados com "banco indisponível"; o resto da loja continua.
+    depends_on:
+      pagamentos-db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck: *healthcheck-servico
+    stop_grace_period: 10s
+
+  # ---------- banco-falso: o sistema externo ----------
+  # Representa o banco do cartão, que não é nosso: fora do Kong, com porta própria.
+  # Mude o comportamento ao vivo: POST localhost:9000/config { "latenciaMs": 3000, "falhaPercent": 30 }
+  banco-falso:
+    build: ./fake-bank
+    ports:
+      - "9000:3000"
+    environment:
+      JAVA_TOOL_OPTIONS: *jvm-servico
+      PORT: 3000
+    healthcheck: *healthcheck-servico
+
+  # ---------- cache da vitrine: Redis ----------
+  # Sem persistência (--save "" e sem AOF): reiniciado, volta vazio, nunca com dado velho de antes.
+  # 64 MB, descartando só chaves com TTL: o catalogo:versao (sem TTL) nunca é descartado.
+  # Não publica porta. Para olhar por dentro: docker compose exec redis redis-cli
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "64mb",
+              "--maxmemory-policy", "volatile-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # ---------- mensageria: Kafka (KRaft) ----------
+  # Um container faz tudo: broker e controller (KRaft, sem ZooKeeper). Um broker só, fator 1:
+  # ótimo para aprender, inaceitável em produção. Não publica porta: só a rede interna fala com ele.
+  kafka:
+    image: apache/kafka:3.8.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      # O endereço que o Kafka informa aos clientes: o nome na rede do compose
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
+      # O padrão é 1 GB de heap: metade do WSL inteiro. Um broker de aula vive com 256 MB.
+      KAFKA_HEAP_OPTS: ${KAFKA_HEAP_OPTS:--Xms256m -Xmx256m}
+      # Id fixo do cluster KRaft (qualquer UUID em base64); o mesmo em toda subida
+      CLUSTER_ID: 5L6g3nShT-eMCtK--X86sw
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 15s
+
+  # Tópicos, mensagens, grupos e lag: http://localhost:8090
+  kafka-ui:
+    image: kafbat/kafka-ui:v1.1.0
+    ports:
+      - "127.0.0.1:8090:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: ecommerce
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      JAVA_OPTS: -Xms32m -Xmx128m -XX:+UseSerialGC -XX:TieredStopAtLevel=1
+    depends_on:
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8080/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+
+  # SMTP de mentira: recebe tudo e mostra em http://localhost:8025. Nada sai para a internet.
+  mailpit:
+    image: axllent/mailpit
+    ports:
+      - "127.0.0.1:8025:8025"   # caixa de entrada (o SMTP, 1025, fica só na rede interna)
 
   # ---------- gateway: Kong sem banco ----------
   # A única porta da API. Os serviços não publicam porta: só o gateway os alcança.
@@ -93,7 +276,17 @@ services:
       - "127.0.0.1:8002:8002"      # Kong Manager, só nesta máquina
     volumes:
       - ./kong:/kong:ro
-    # Copia o kong.yml trocando __JWT_SECRET__ pelo segredo do .env e sobe o Kong.
+    # Só abre a porta quando os serviços da API estão de pé: depois do "up -d", o .http já vende.
+    depends_on:
+      usuarios:
+        condition: service_healthy
+      catalogo:
+        condition: service_healthy
+      pedidos:
+        condition: service_healthy
+      pagamentos:
+        condition: service_healthy
+    # Copia o kong.yml trocando __JWT_SECRET__ pelo segredo (o mesmo do usuarios) e sobe o Kong.
     # $$ escapa o $ para o compose: quem expande a variável é o sh, dentro do container.
     entrypoint:
       - sh
@@ -101,7 +294,7 @@ services:
       - 'sed "s|__JWT_SECRET__|$${JWT_SECRET}|g" /kong/kong.yml > /tmp/kong.yml && exec /docker-entrypoint.sh kong docker-start'
     environment:
       # O mesmo segredo que o usuarios usa para assinar os tokens
-      JWT_SECRET: ${JWT_SECRET:?defina JWT_SECRET no .env (copie de .env.example)}
+      JWT_SECRET: *jwt-secret
       KONG_DATABASE: "off"
       KONG_DECLARATIVE_CONFIG: /tmp/kong.yml
       KONG_PROXY_LISTEN: 0.0.0.0:8000
@@ -118,3 +311,4 @@ volumes:
   usuarios-db-data:
   catalogo-db-data:
   pedidos-db-data:
+  pagamentos-db-data:

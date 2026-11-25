@@ -11,6 +11,7 @@ import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.stereotype.Component;
 
+import br.com.ecommerce.catalogo.cache.VitrineCache;
 import br.com.ecommerce.catalogo.document.Categoria;
 import br.com.ecommerce.catalogo.document.Estoque;
 import br.com.ecommerce.catalogo.document.Produto;
@@ -33,10 +34,13 @@ public class DataSeeder implements ApplicationRunner {
 
 	private final CategoriaRepository categoriaRepository;
 	private final ProdutoRepository produtoRepository;
+	private final VitrineCache cache;
 
-	public DataSeeder(CategoriaRepository categoriaRepository, ProdutoRepository produtoRepository) {
+	public DataSeeder(CategoriaRepository categoriaRepository, ProdutoRepository produtoRepository,
+			VitrineCache cache) {
 		this.categoriaRepository = categoriaRepository;
 		this.produtoRepository = produtoRepository;
+		this.cache = cache;
 	}
 
 	@Override
@@ -58,6 +62,10 @@ public class DataSeeder implements ApplicationRunner {
 		}
 
 		log.info("Seed: {} categorias e {} produtos inseridos", categorias, produtos);
+		// Alguém pode ter lido a vitrine vazia enquanto o seed rodava
+		if (categorias + produtos > 0) {
+			cache.invalidar("seed");
+		}
 	}
 
 	// Criados a cada execução: o save preenche o id, então não dá para reaproveitar instâncias

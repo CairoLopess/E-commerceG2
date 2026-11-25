@@ -32,7 +32,7 @@ public class PedidoController {
 
 	/**
 	 * 202 e não 201: o pedido foi aceito, mas ainda não terminou. Falta reservar o estoque e
-	 * cobrar; hoje ele fica em AGUARDANDO_ESTOQUE, e o Kafka o faz andar na próxima aula.
+	 * cobrar: ele nasce em AGUARDANDO_ESTOQUE e anda sozinho, por eventos.
 	 */
 	@PostMapping
 	public ResponseEntity<PedidoResponse> finalizar(@RequestHeader(UsuarioLogado.ID) UUID usuarioId,
@@ -53,6 +53,8 @@ public class PedidoController {
 		return pedidoService.buscar(usuarioId, id);
 	}
 
+	// Só em AGUARDANDO_ESTOQUE ou AGUARDANDO_PAGAMENTO (409 depois). Publica pedido.cancelado:
+	// o catálogo devolve o estoque e o pagamentos estorna (ou bloqueia a cobrança).
 	@PostMapping("/{id}/cancelar")
 	public PedidoResponse cancelar(@RequestHeader(UsuarioLogado.ID) UUID usuarioId, @PathVariable UUID id) {
 		return pedidoService.cancelar(usuarioId, id);

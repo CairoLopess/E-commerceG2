@@ -85,6 +85,22 @@ services:
           - name: jwt
             config: { key_claim_name: perfil, claims_to_verify: [exp] }
 
+  # ---------- pagamentos ----------
+  # Só leitura, para qualquer perfil logado: quem confere "é seu?" (404) e "é admin?" (403, na
+  # listagem) é o serviço, com o X-User-Id e o X-User-Role. O banco-falso NÃO tem rota aqui: é
+  # um sistema externo, ninguém de fora deveria chamar o banco pela loja.
+  - name: pagamentos
+    url: http://pagamentos:3000
+    routes:
+      - name: consultar-pagamentos
+        methods: [GET]
+        paths: ["~/pagamentos(/.*)?$"]
+        strip_path: false
+        tags: [logado]
+        plugins:
+          - name: jwt
+            config: { key_claim_name: perfil, claims_to_verify: [exp] }
+
   # ---------- health de cada serviço ----------
   # Os serviços respondem em /health; de fora, cada um tem o seu caminho.
   # strip_path: true corta /health/<servico> e o Kong chama a url do service (que já termina em /health).
@@ -112,6 +128,16 @@ services:
       - name: health-pedidos
         methods: [GET]
         paths: ["~/health/pedidos$"]
+        strip_path: true
+        tags: [publico]
+
+  # Mostra também o estado do circuito do banco: { circuitoBancoExterno: fechado | aberto | meio-aberto }
+  - name: pagamentos-health
+    url: http://pagamentos:3000/health
+    routes:
+      - name: health-pagamentos
+        methods: [GET]
+        paths: ["~/health/pagamentos$"]
         strip_path: true
         tags: [publico]
 
