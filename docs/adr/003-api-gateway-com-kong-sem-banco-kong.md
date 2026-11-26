@@ -1,4 +1,4 @@
-# ADR-008 — API Gateway com Kong sem banco (`kong/kong.yml`)
+# ADR-003 — API Gateway com Kong sem banco (`kong/kong.yml`)
 
 **Contexto.** Na aula 1, cada serviço tinha a sua porta, o cliente precisava conhecer todas, e as
 rotas de admin do catálogo estavam abertas.

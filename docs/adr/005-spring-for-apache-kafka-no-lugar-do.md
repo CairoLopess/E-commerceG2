@@ -1,4 +1,4 @@
-# ADR-017 — Spring for Apache Kafka no lugar do kafkajs dos slides
+# ADR-005 — Spring for Apache Kafka no lugar do kafkajs dos slides
 
 **Contexto.** Os exemplos da aula usam Node (kafkajs, nodemailer); os serviços deste projeto são
 Spring Boot.
@@ -13,5 +13,5 @@ tentativas com 1 s entre elas e depois segue (sem DLQ). Os e-mails saem com
 consumer sair do grupo ao parar.
 
 **Consequências.** Mesma semântica dos slides (pelo menos uma vez, chave = pedido, um grupo por
-serviço), com o ecossistema que o projeto já usa. O notificacoes é um Spring Boot sem web
-(`web-application-type=none`): fica no ar enquanto o listener roda.
+serviço), com o ecossistema que o projeto já usa. O notificacoes não tem rota no Kong: o servidor
+HTTP dele existe só para o `/health` (ADR-009).

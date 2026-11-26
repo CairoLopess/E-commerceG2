@@ -1,4 +1,4 @@
-# ADR-019 — Resiliência só na chamada ao banco: timeout, retry local e Resilience4j
+# ADR-007 — Resiliência só na chamada ao banco: timeout, retry local e Resilience4j
 
 **Contexto.** Os slides usam `fetch` com `AbortSignal.timeout` e o opossum (Node). O banco do cartão
 é o único sistema externo, lento e instável por definição.

@@ -1,4 +1,4 @@
-# ADR-025 — Cache-aside no Redis, só na vitrine, invalidado por versão
+# ADR-010 — Cache-aside no Redis, só na vitrine, invalidado por versão
 
 **Contexto.** A vitrine (produtos e categorias) é o que mais se lê e o que menos muda. Cada filtro
 (`categoria`, `busca`) é uma resposta diferente, e o estoque que ela mostra muda a cada compra.

@@ -1,4 +1,4 @@
-# ADR-024 — `/health` com três estados, sem chamar outros serviços
+# ADR-009 — `/health` com três estados, sem chamar outros serviços
 
 **Contexto.** Até a aula 4, cada `/health` respondia `{ status, banco }`, com 200 ou 503. O Docker
 não olhava para ele, e "o processo respondeu" não dizia nada sobre o Kafka, o cache ou o banco do

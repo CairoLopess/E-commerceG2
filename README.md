@@ -176,7 +176,7 @@ válido (401 se não); **admin** = token válido com perfil admin (403 se for cl
 | POST | `/categorias` | admin | 201 · 400 · 401 · 403 · 409 slug já existe |
 | GET | `/health/catalogo` | público | 200 `ok` ou `degradado` (Redis fora) · 503 `fora do ar` (sem Mongo ou Kafka) |
 
-As rotas de admin do catálogo, abertas na aula 1 (ADR-004), agora são fechadas pelo gateway.
+As rotas de admin do catálogo, abertas na aula 1, agora são fechadas pelo gateway.
 
 ### pedidos
 
@@ -335,7 +335,7 @@ evento repetido ou atrasado não leva o pedido para trás. O status funciona com
 `AGUARDANDO_*` diz "isto ainda pode mudar", e um `CANCELADO` não volta a `PAGO` porque o banco
 aprovou atrasado. `POST /pedidos/{id}/cancelar` é permitido em `AGUARDANDO_ESTOQUE` e
 `AGUARDANDO_PAGAMENTO`; depois de `PAGO`, 409. O `pagamento.aprovado` também vale a partir de
-`AGUARDANDO_ESTOQUE` (ADR-022).
+`AGUARDANDO_ESTOQUE`.
 
 ---
 
@@ -584,34 +584,18 @@ docker compose start redis
 Uma por arquivo em [`docs/adr/`](docs/adr), com contexto, decisão e consequências (o que se ganhou
 e o que se perdeu).
 
-| ADR | Decisão | Situação |
-|---|---|---|
-| [ADR-001](docs/adr/001-persistencia-poliglota-postgres-no-usuarios-mongo-no.md) | Persistência poliglota: Postgres no usuarios, Mongo no catalogo | em vigor |
-| [ADR-002](docs/adr/002-esquema-do-postgres-gerado-pelo-hibernate-ddl.md) | Esquema do Postgres gerado pelo Hibernate (`ddl-auto=update`), sem migrations | em vigor |
-| [ADR-003](docs/adr/003-jwt-com-spring-security-validado-no-proprio.md) | JWT com Spring Security, validado no próprio serviço usuarios | substituído |
-| [ADR-004](docs/adr/004-rotas-de-admin-do-catalogo-abertas-ate.md) | Rotas de admin do catálogo abertas até a aula 2 | resolvido |
-| [ADR-005](docs/adr/005-delete-de-produto-e-exclusao-logica-ativo.md) | DELETE de produto é exclusão lógica (`ativo = false`) | em vigor |
-| [ADR-006](docs/adr/006-patch-produtos-id-estoque-define-o-valor.md) | `PATCH /produtos/{id}/estoque` define o valor disponível | em vigor |
-| [ADR-007](docs/adr/007-preco-como-bigdecimal-decimal128.md) | Preço como `BigDecimal` / `Decimal128` | em vigor |
-| [ADR-008](docs/adr/008-api-gateway-com-kong-sem-banco-kong.md) | API Gateway com Kong sem banco (`kong/kong.yml`) | em vigor |
-| [ADR-009](docs/adr/009-os-servicos-confiam-nos-cabecalhos-x-user.md) | Os serviços confiam nos cabeçalhos X-User-* e não validam token | em vigor |
-| [ADR-010](docs/adr/010-todo-servico-escuta-na-porta-3000-dentro.md) | Todo serviço escuta na porta 3000 dentro da rede | em vigor |
-| [ADR-011](docs/adr/011-o-checkout-chama-o-catalogo-direto-de.md) | O checkout chama o catálogo direto, de forma síncrona, com timeout de 3 s | em vigor |
-| [ADR-012](docs/adr/012-o-pedido-copia-nome-preco-e-endereco.md) | O pedido copia nome, preço e endereço; sem FK para outros serviços | em vigor |
-| [ADR-013](docs/adr/013-checkout-responde-202-e-o-pedido-nasce.md) | Checkout responde 202 e o pedido nasce em `AGUARDANDO_ESTOQUE` | atualizado |
-| [ADR-014](docs/adr/014-checkout-por-eventos-kafka-em-coreografia.md) | Checkout por eventos (Kafka), em coreografia | em vigor |
-| [ADR-015](docs/adr/015-publicar-depois-do-commit-sem-outbox.md) | Publicar depois do commit, sem Outbox | em vigor |
-| [ADR-016](docs/adr/016-idempotencia-reservas-por-pedido-e-filtro-de.md) | Idempotência: reservas por pedido e filtro de estado | em vigor |
-| [ADR-017](docs/adr/017-spring-for-apache-kafka-no-lugar-do.md) | Spring for Apache Kafka no lugar do kafkajs dos slides | em vigor |
-| [ADR-018](docs/adr/018-saga-coreografada-com-uma-compensacao-por-servico.md) | Saga coreografada, com uma compensação por serviço | em vigor |
-| [ADR-019](docs/adr/019-resiliencia-so-na-chamada-ao-banco-timeout.md) | Resiliência só na chamada ao banco: timeout, retry local e Resilience4j | em vigor |
-| [ADR-020](docs/adr/020-pagamentos-com-jdbc-e-schema-sql-sem.md) | Pagamentos com JDBC e `schema.sql`, sem JPA | em vigor |
-| [ADR-021](docs/adr/021-cancelar-publica-o-pedido-cancelado-antes-do.md) | Cancelar publica o `pedido.cancelado` antes do commit | em vigor |
-| [ADR-022](docs/adr/022-pago-tambem-a-partir-de-aguardando-estoque.md) | `PAGO` também a partir de `AGUARDANDO_ESTOQUE` | em vigor |
-| [ADR-023](docs/adr/023-pagamentos-ouve-os-dois-topicos-num-listener.md) | Pagamentos ouve os dois tópicos num listener só | em vigor |
-| [ADR-024](docs/adr/024-health-com-tres-estados-sem-chamar-outros.md) | `/health` com três estados, sem chamar outros serviços | em vigor |
-| [ADR-025](docs/adr/025-cache-aside-no-redis-so-na-vitrine.md) | Cache-aside no Redis, só na vitrine, invalidado por versão | em vigor |
-| [ADR-026](docs/adr/026-sobe-do-zero-com-um-comando-valores.md) | Sobe do zero com um comando: valores padrão no compose e memória limitada | em vigor |
+| ADR | Decisão |
+|---|---|
+| [ADR-001](docs/adr/001-persistencia-poliglota-postgres-no-usuarios-mongo-no.md) | Persistência poliglota: Postgres no usuarios, Mongo no catalogo |
+| [ADR-002](docs/adr/002-esquema-do-postgres-gerado-pelo-hibernate-ddl.md) | Esquema do Postgres gerado pelo Hibernate (`ddl-auto=update`), sem migrations |
+| [ADR-003](docs/adr/003-api-gateway-com-kong-sem-banco-kong.md) | API Gateway com Kong sem banco (`kong/kong.yml`), um consumer por perfil |
+| [ADR-004](docs/adr/004-checkout-por-eventos-e-saga-em-coreografia.md) | Checkout por eventos (Kafka) e saga em coreografia |
+| [ADR-005](docs/adr/005-spring-for-apache-kafka-no-lugar-do.md) | Spring for Apache Kafka no lugar do kafkajs dos slides |
+| [ADR-006](docs/adr/006-publicar-depois-do-commit-sem-outbox.md) | Publicar depois do commit, sem Outbox |
+| [ADR-007](docs/adr/007-resiliencia-so-na-chamada-ao-banco-timeout.md) | Resiliência só na chamada ao banco: timeout, retry local e Resilience4j |
+| [ADR-008](docs/adr/008-banco-do-cartao-fora-cancelar-sem-esperar.md) | Banco do cartão fora: cancelar o pedido, sem esperar |
+| [ADR-009](docs/adr/009-health-com-tres-estados-sem-chamar-outros.md) | `/health` com três estados, sem chamar outros serviços |
+| [ADR-010](docs/adr/010-cache-aside-no-redis-so-na-vitrine.md) | Cache-aside no Redis, só na vitrine, invalidado por versão |
 
 ---
 
@@ -697,8 +681,7 @@ estoque, e a vitrine respondendo com `X-Cache: OFF` quando ele cai.
 ├── .env.example              # opcional: só para trocar valores ou rodar fora do Docker
 ├── http/                     # requisições de teste (REST Client); fluxo-completo.http é a entrega final
 ├── docs/
-│   ├── adr/                  # as decisões de arquitetura, uma por arquivo
-│   └── discussoes.md         # as perguntas "para discutir em dupla" de cada aula, respondidas
+│   └── adr/                  # as decisões de arquitetura, uma por arquivo
 ├── usersApi/                 # serviço usuarios
 │   ├── Dockerfile
 │   ├── pom.xml
@@ -745,8 +728,3 @@ estoque, e a vitrine respondendo com `X-Cache: OFF` quando ele cai.
 Cada serviço é independente: seu próprio `pom.xml`, `Dockerfile` e banco. Nenhum importa código
 do outro: o que eles compartilham é o formato dos eventos, e por isso a classe `Eventos` é copiada
 (igual) em cada um, assim como a `KafkaSaude` do `/health`.
-
-### Para discutir em dupla
-
-As perguntas do fim de cada aula, respondidas com o que o projeto faz:
-[`docs/discussoes.md`](docs/discussoes.md).
