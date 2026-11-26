@@ -8,8 +8,10 @@ COPY mvnw pom.xml ./
 # Garante LF no mvnw mesmo se alguém fizer checkout com CRLF no Windows
 RUN sed -i 's/\r$//' mvnw && chmod +x mvnw
 COPY src src
-# O cache do ~/.m2 evita baixar todas as dependências a cada build
-RUN --mount=type=cache,target=/root/.m2 ./mvnw -B -q -DskipTests package
+# O cache do ~/.m2 evita baixar todas as dependências a cada build. É o mesmo cache nos 6
+# serviços, e o compose constrói todos ao mesmo tempo: sharing=locked faz um esperar o outro
+# (sem isso, os Maven Wrappers instalam o Maven no mesmo lugar juntos e um quebra o outro).
+RUN --mount=type=cache,target=/root/.m2,sharing=locked ./mvnw -B -q -DskipTests package
 
 # 2) Execução: só o JRE e o .jar
 FROM eclipse-temurin:21-jre
