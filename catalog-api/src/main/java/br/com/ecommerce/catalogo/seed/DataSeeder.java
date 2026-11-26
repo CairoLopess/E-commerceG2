@@ -72,33 +72,33 @@ public class DataSeeder implements ApplicationRunner {
 	private static List<Produto> produtos() {
 		return List.of(
 				// celulares: memória e cor
-				produto("CEL-001", "Smartphone X", "celulares", "2499.90", 10,
+				produto("CEL-001", "Smartphone X", "celulares", "2499.90", 100,
 						Map.of("memoria", "128GB", "cor", "preto")),
-				produto("CEL-002", "Smartphone X Pro", "celulares", "3999.90", 5,
+				produto("CEL-002", "Smartphone X Pro", "celulares", "3999.90", 50,
 						Map.of("memoria", "256GB", "cor", "azul")),
-				produto("CEL-003", "Smartphone Lite", "celulares", "1299.90", 20,
+				produto("CEL-003", "Smartphone Lite", "celulares", "1299.90", 200,
 						Map.of("memoria", "64GB", "cor", "branco")),
-				produto("CEL-004", "Smartphone Max", "celulares", "5499.00", 3,
+				produto("CEL-004", "Smartphone Max", "celulares", "5499.00", 30,
 						Map.of("memoria", "512GB", "cor", "grafite")),
 
 				// roupas: tamanho e tecido
-				produto("CAM-010", "Camiseta básica", "roupas", "59.90", 40,
+				produto("CAM-010", "Camiseta básica", "roupas", "59.90", 400,
 						Map.of("tamanho", "M", "tecido", "algodão")),
-				produto("CAM-011", "Camisa polo", "roupas", "99.90", 25,
+				produto("CAM-011", "Camisa polo", "roupas", "99.90", 250,
 						Map.of("tamanho", "G", "tecido", "piquet")),
-				produto("CAL-020", "Calça jeans", "roupas", "179.90", 15,
+				produto("CAL-020", "Calça jeans", "roupas", "179.90", 150,
 						Map.of("tamanho", "42", "tecido", "jeans")),
-				produto("JAQ-030", "Jaqueta corta-vento", "roupas", "249.90", 8,
+				produto("JAQ-030", "Jaqueta corta-vento", "roupas", "249.90", 80,
 						Map.of("tamanho", "M", "tecido", "poliéster")),
 
 				// livros: autor e páginas
-				produto("LIV-100", "Java Efetivo", "livros", "129.90", 12,
+				produto("LIV-100", "Java Efetivo", "livros", "129.90", 120,
 						Map.of("autor", "Joshua Bloch", "paginas", 412)),
-				produto("LIV-101", "Código Limpo", "livros", "99.90", 18,
+				produto("LIV-101", "Código Limpo", "livros", "99.90", 180,
 						Map.of("autor", "Robert C. Martin", "paginas", 425)),
-				produto("LIV-102", "Arquitetura Limpa", "livros", "89.90", 9,
+				produto("LIV-102", "Arquitetura Limpa", "livros", "89.90", 90,
 						Map.of("autor", "Robert C. Martin", "paginas", 432)),
-				produto("LIV-103", "Domain-Driven Design", "livros", "149.90", 6,
+				produto("LIV-103", "Domain-Driven Design", "livros", "149.90", 60,
 						Map.of("autor", "Eric Evans", "paginas", 528)));
 	}
 
