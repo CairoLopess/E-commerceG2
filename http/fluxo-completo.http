@@ -113,6 +113,15 @@ GET {{baseUrl}}/produtos/{{vitrine.response.body.$[1].id}}
 # =====================================================================
 # 3. Cancelamento com estorno
 # =====================================================================
+# O cancelamento tem que chegar enquanto o banco cobra: o 3.4 vai até ~1,5 s depois da resposta do
+# 3.3. Passou disso, o pedido já está PAGO e o 3.4 devolve 409 (o mesmo do 1.7).
+#
+# Como fazer a tempo, sem pressa:
+#   1. Clique numa linha do 3.3 (o cursor de texto fica nele).
+#   2. Deixe o ponteiro do mouse parado em cima do "Send Request" do 3.4.
+#   3. Ctrl+Alt+R (Cmd+Alt+R no Mac) envia o 3.3 pelo teclado.
+#   4. Apareceu o 202 no painel da resposta? Clique (o mouse já está no lugar).
+# Não clique antes do 202: o 3.4 usa o id que vem na resposta do 3.3.
 
 ### 3.1 Preparar: o banco leva 1,5 s para responder (ainda dentro do timeout de 2 s)
 POST {{banco}}/config
@@ -127,7 +136,7 @@ Content-Type: application/json
 
 { "produtoId": "{{vitrine.response.body.$[1].id}}", "quantidade": 1 }
 
-### 3.3 Checkout com pix -> 202. Mande o 3.4 LOGO EM SEGUIDA (antes de 1,5 s)
+### 3.3 Checkout com pix -> 202. Envie com Ctrl+Alt+R e mande o 3.4 logo em seguida (veja acima)
 # @name cancelado
 POST {{baseUrl}}/pedidos
 Authorization: Bearer {{login.response.body.$.token}}
@@ -139,7 +148,8 @@ Content-Type: application/json
 }
 
 ### 3.4 Cancelar enquanto o banco cobra -> 200, CANCELADO (publica pedido.cancelado)
-# Deu 409 (o pedido já estava PAGO)? Foi devagar: mande 3.2, 3.3 e 3.4 de novo, mais rápido.
+# Deu 409 (o pedido já estava PAGO)? Chegou depois da cobrança: mande 3.2, 3.3 e 3.4 de novo
+# (o 3.2 porque o checkout esvazia o carrinho). O estoque do seed dá para várias tentativas.
 POST {{baseUrl}}/pedidos/{{cancelado.response.body.$.id}}/cancelar
 Authorization: Bearer {{login.response.body.$.token}}
 
